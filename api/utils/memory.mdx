@@ -1,0 +1,430 @@
+---
+title: 'Memory Utilities'
+description: 'Virtual memory management and memory manipulation utilities'
+---
+
+Skyline provides memory utilities for virtual memory management, JIT code execution, and low-level memory operations.
+
+## Virtual Memory Management
+
+The virtual memory (virtmem) utilities provide address space reservation and management for JIT compilation and dynamic memory mapping.
+
+### virtmemReserve
+
+Reserves a slice of general-purpose address space.
+
+```cpp
+void* virtmemReserve(size_t size)
+```
+
+<ParamField path="size" type="size_t" required>
+  Size of the address space to reserve (rounded up to page alignment)
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Pointer to the reserved address space, or NULL on failure
+</ResponseField>
+
+**Use Cases:**
+- Allocating space for JIT-compiled code
+- Reserving contiguous virtual address ranges
+- Setting up custom memory mappings
+
+**Example:**
+```cpp
+size_t codeSize = 0x100000;  // 1 MB
+void* codeRegion = virtmemReserve(codeSize);
+if (codeRegion) {
+    // Use the reserved region for JIT code
+}
+```
+
+<Note>
+  The size is automatically rounded up to page alignment (typically 0x1000 bytes).
+</Note>
+
+---
+
+### virtmemFree
+
+Relinquishes a slice of address space reserved with virtmemReserve.
+
+```cpp
+void virtmemFree(void* addr, size_t size)
+```
+
+<ParamField path="addr" type="void*" required>
+  Pointer to the address space slice to free
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Size of the address space slice
+</ParamField>
+
+<Warning>
+  Currently a no-op, but should still be called for future compatibility.
+</Warning>
+
+**Example:**
+```cpp
+void* region = virtmemReserve(0x100000);
+// ... use region ...
+virtmemFree(region, 0x100000);
+```
+
+---
+
+### virtmemReserveStack
+
+Reserves a slice of address space inside the stack memory mapping region.
+
+```cpp
+void* virtmemReserveStack(size_t size)
+```
+
+<ParamField path="size" type="size_t" required>
+  Size of the address space to reserve (rounded up to page alignment)
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Pointer to the reserved stack region, or NULL on failure
+</ResponseField>
+
+**Purpose:**
+This function is specifically for use with `svcMapMemory`, which requires addresses within the stack mapping region.
+
+**Example:**
+```cpp
+size_t stackSize = 0x10000;  // 64 KB
+void* stackRegion = virtmemReserveStack(stackSize);
+if (stackRegion) {
+    // Use with svcMapMemory
+    Result rc = svcMapMemory(stackRegion, physicalAddr, stackSize);
+}
+```
+
+<Info>
+  Use this instead of `virtmemReserve` when you need to map memory with `svcMapMemory`.
+</Info>
+
+---
+
+### virtmemFreeStack
+
+Relinquishes a slice of address space reserved with virtmemReserveStack.
+
+```cpp
+void virtmemFreeStack(void* addr, size_t size)
+```
+
+<ParamField path="addr" type="void*" required>
+  Pointer to the stack region to free
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Size of the stack region
+</ParamField>
+
+<Warning>
+  Currently a no-op, but should still be called for future compatibility.
+</Warning>
+
+---
+
+### virtmemSetup
+
+Initializes the virtual memory subsystem.
+
+```cpp
+void virtmemSetup()
+```
+
+**Purpose:**
+- Initializes internal state for virtmem functions
+- Must be called before using any virtmem functions
+- Required for libnx JIT functionality
+
+**Usage in Skyline:**
+```cpp
+extern "C" void skyline_init() {
+    skyline::utils::init();
+    virtmemSetup();  // needed for libnx JIT
+    skyline_main();
+}
+```
+
+<Warning>
+  This must be called early during initialization, before any JIT code generation or virtmem operations.
+</Warning>
+
+---
+
+## Memory Manipulation Functions
+
+Low-level memory manipulation functions for copying, setting, and searching memory.
+
+### memset
+
+Fills a block of memory with a specific value.
+
+```cpp
+void* memset(void* src, int val, u64 num)
+```
+
+<ParamField path="src" type="void*" required>
+  Pointer to the memory block to fill
+</ParamField>
+
+<ParamField path="val" type="int" required>
+  Value to set (converted to unsigned char)
+</ParamField>
+
+<ParamField path="num" type="u64" required>
+  Number of bytes to set
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Returns the src pointer
+</ResponseField>
+
+**Example:**
+```cpp
+char buffer[256];
+memset(buffer, 0, sizeof(buffer));  // Zero out buffer
+```
+
+---
+
+### memcpy
+
+Copies bytes from source to destination.
+
+```cpp
+void* memcpy(void* dest, void const* src, u64 count)
+```
+
+<ParamField path="dest" type="void*" required>
+  Destination pointer
+</ParamField>
+
+<ParamField path="src" type="void const*" required>
+  Source pointer
+</ParamField>
+
+<ParamField path="count" type="u64" required>
+  Number of bytes to copy
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Returns the dest pointer
+</ResponseField>
+
+<Warning>
+  Source and destination must not overlap. Use `memmove` if they might overlap.
+</Warning>
+
+**Example:**
+```cpp
+char src[10] = "hello";
+char dest[10];
+memcpy(dest, src, 6);  // Copy "hello\0"
+```
+
+---
+
+### memmove
+
+Copies bytes from source to destination, handling overlapping regions.
+
+```cpp
+void* memmove(void* dest, const void* src, u64 count)
+```
+
+<ParamField path="dest" type="void*" required>
+  Destination pointer
+</ParamField>
+
+<ParamField path="src" type="const void*" required>
+  Source pointer
+</ParamField>
+
+<ParamField path="count" type="u64" required>
+  Number of bytes to copy
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Returns the dest pointer
+</ResponseField>
+
+**Example:**
+```cpp
+char buffer[20] = "hello world";
+// Shift data within the same buffer
+memmove(buffer + 2, buffer, 11);
+```
+
+<Info>
+  Use this instead of `memcpy` when source and destination regions might overlap.
+</Info>
+
+---
+
+### memalign
+
+Allocates aligned memory.
+
+```cpp
+void* memalign(size_t alignment, size_t size)
+```
+
+<ParamField path="alignment" type="size_t" required>
+  Alignment requirement (must be a power of 2)
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to allocate
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Pointer to aligned memory, or NULL on failure
+</ResponseField>
+
+**Example:**
+```cpp
+// Allocate 64 KB stack with 0x1000 byte alignment
+void* stack = memalign(0x1000, 0x10000);
+if (stack) {
+    // Use aligned memory
+    free(stack);
+}
+```
+
+**Usage in Skyline:**
+```cpp
+// From SafeQueue.cpp
+void SafeTaskQueue::startThread(s32 priority, s32 core, u64 stackSize) {
+    void* stack = memalign(0x1000, stackSize);
+    Result rc = nn::os::CreateThread(&thread, entrypoint, this, stack, stackSize, priority, core);
+    nn::os::StartThread(&thread);
+}
+```
+
+---
+
+### memmem
+
+Searches for a sequence of bytes within a memory region.
+
+```cpp
+void* memmem(void* needle, size_t needleLen, void* haystack, size_t haystackLen)
+```
+
+<ParamField path="needle" type="void*" required>
+  Pointer to the byte sequence to search for
+</ParamField>
+
+<ParamField path="needleLen" type="size_t" required>
+  Length of the needle in bytes
+</ParamField>
+
+<ParamField path="haystack" type="void*" required>
+  Pointer to the memory region to search in
+</ParamField>
+
+<ParamField path="haystackLen" type="size_t" required>
+  Length of the haystack in bytes
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Pointer to the first occurrence of needle in haystack, or NULL if not found
+</ResponseField>
+
+**Example:**
+```cpp
+const char haystack[] = "Hello, World!";
+const char needle[] = "World";
+void* result = memmem((void*)needle, 5, (void*)haystack, 13);
+if (result) {
+    // Found at result
+}
+```
+
+---
+
+## Memory Safety Considerations
+
+<Warning>
+  **Important Safety Guidelines:**
+  
+  - Always check return values from allocation functions (`virtmemReserve`, `memalign`)
+  - Ensure proper alignment for platform requirements (typically 0x1000 for code regions)
+  - Be careful with memory barriers when writing executable code
+  - Use `memmove` instead of `memcpy` when regions might overlap
+  - Free all allocated memory to prevent leaks
+</Warning>
+
+## JIT Code Generation Example
+
+```cpp
+// Reserve memory for JIT code
+size_t codeSize = 0x10000;
+void* codeRegion = virtmemReserve(codeSize);
+
+if (codeRegion) {
+    // Make the region executable
+    Result rc = svcSetProcessMemoryPermission(
+        currentProcessHandle,
+        (u64)codeRegion,
+        codeSize,
+        Perm_Rx | Perm_W
+    );
+    
+    if (R_SUCCEEDED(rc)) {
+        // Write JIT code to the region
+        u32* code = (u32*)codeRegion;
+        code[0] = 0xD65F03C0;  // ret instruction
+        
+        // Flush instruction cache
+        armDCacheFlush(codeRegion, codeSize);
+        armICacheInvalidate(codeRegion, codeSize);
+        
+        // Execute JIT code
+        void (*jitFunc)() = (void(*)())codeRegion;
+        jitFunc();
+    }
+    
+    virtmemFree(codeRegion, codeSize);
+}
+```
+
+---
+
+## Integration with Skyline
+
+Memory utilities are fundamental to Skyline's operation:
+
+**Initialization (main.cpp):**
+```cpp
+extern "C" void skyline_init() {
+    skyline::utils::init();
+    virtmemSetup();  // Initialize virtmem for JIT
+    skyline_main();
+}
+```
+
+**Thread Stack Allocation (SafeQueue.cpp):**
+```cpp
+void SafeTaskQueue::startThread(s32 priority, s32 core, u64 stackSize) {
+    void* stack = memalign(0x1000, stackSize);
+    Result rc = nn::os::CreateThread(&thread, entrypoint, this, 
+                                      stack, stackSize, priority, core);
+    nn::os::StartThread(&thread);
+}
+```
+
+**Socket Buffer Allocation (main.cpp):**
+```cpp
+const size_t poolSize = 0x600000;
+void* socketPool = memalign(0x4000, poolSize);
+nn::socket::Initialize(socketPool, poolSize, 0x20000, 14);
+```

@@ -1,0 +1,251 @@
+---
+title: Logger Overview
+description: Base logger interface and architecture for Skyline
+---
+
+## Overview
+
+The Skyline logger system provides a flexible logging framework with multiple implementations for debugging and monitoring your hooks and mods. All loggers inherit from the abstract `Logger` base class defined in `skyline/logger/Logger.hpp`.
+
+## Global Instance
+
+The logger system uses a global singleton instance that can be accessed from anywhere in your code:
+
+```cpp
+namespace skyline::logger {
+    extern Logger* s_Instance;
+}
+```
+
+**Usage Example:**
+
+```cpp
+#include "skyline/logger/Logger.hpp"
+
+// Log a simple message
+skyline::logger::s_Instance->Log("Hello from Skyline!\n");
+
+// Log formatted output
+skyline::logger::s_Instance->LogFormat("Value: %d, Address: 0x%llx\n", value, address);
+```
+
+## Logger Base Class
+
+All logger implementations inherit from the `Logger` abstract class and must implement the following pure virtual methods:
+
+### Pure Virtual Methods
+
+#### Initialize
+
+```cpp
+virtual void Initialize() = 0
+```
+
+Called when the logger thread starts. Override this to set up network connections, open files, or perform other initialization tasks.
+
+#### SendRaw
+
+```cpp
+virtual void SendRaw(void* data, size_t size) = 0
+```
+
+<ParamField path="data" type="void*" required>
+  Pointer to the raw data buffer to send
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to send from the buffer
+</ParamField>
+
+Sends raw data directly to the logger output. This is called by the logger thread when flushing the message queue.
+
+#### FriendlyName
+
+```cpp
+virtual std::string FriendlyName() = 0
+```
+
+Returns a human-readable name for the logger implementation (e.g., "TcpLogger", "SdLogger").
+
+#### ShouldFlush
+
+```cpp
+virtual bool ShouldFlush() = 0
+```
+
+Returns `true` if the logger is ready to flush messages. For example, TcpLogger returns `true` only when a client is connected.
+
+---
+
+## Public Methods
+
+<Note>
+When `NOLOG` is defined at compile time, all public logging methods become empty inline functions, allowing you to disable logging without changing your code.
+</Note>
+
+### StartThread
+
+```cpp
+void StartThread()
+```
+
+Starts the background logger thread that processes the message queue. This should be called after initializing sockets or other dependencies.
+
+**Usage:**
+
+```cpp
+// From main.cpp after socket initialization
+skyline::logger::s_Instance->StartThread();
+```
+
+### Log
+
+```cpp
+void Log(const char* data, size_t size = UINT32_MAX)
+void Log(std::string str)
+```
+
+<ParamField path="data" type="const char*" required>
+  Null-terminated string or raw data buffer to log
+</ParamField>
+
+<ParamField path="size" type="size_t" default="UINT32_MAX">
+  Number of bytes to log. If `UINT32_MAX` (default), uses `strlen(data)`
+</ParamField>
+
+<ParamField path="str" type="std::string" required>
+  String object to log (alternate overload)
+</ParamField>
+
+Adds a message to the internal queue for asynchronous logging. Messages are processed by the logger thread.
+
+**Examples:**
+
+```cpp
+// Log a C string
+skyline::logger::s_Instance->Log("Initialization complete\n");
+
+// Log specific number of bytes
+skyline::logger::s_Instance->Log(buffer, 256);
+
+// Log a std::string
+std::string message = "Status: OK";
+skyline::logger::s_Instance->Log(message);
+```
+
+### LogFormat
+
+```cpp
+void LogFormat(const char* format, ...)
+```
+
+<ParamField path="format" type="const char*" required>
+  printf-style format string
+</ParamField>
+
+<ParamField path="..." type="variadic">
+  Variable arguments matching the format specifiers
+</ParamField>
+
+Logs a formatted message using printf-style format strings. Automatically appends a newline character.
+
+**Example:**
+
+```cpp
+// From main.cpp exception handler
+skyline::logger::s_Instance->LogFormat("Error description: %x\n", info->ErrorDescription);
+skyline::logger::s_Instance->LogFormat("PC: %" PRIx64 "\n", info->PC.x);
+skyline::logger::s_Instance->LogFormat("[%s] Loaded %d plugins", subsystem, count);
+```
+
+### SendRaw (Overload)
+
+```cpp
+void SendRaw(const char* data)
+```
+
+<ParamField path="data" type="const char*" required>
+  Null-terminated string to send immediately
+</ParamField>
+
+Sends data directly without queueing. Uses `strlen()` to determine size.
+
+### SendRawFormat
+
+```cpp
+void SendRawFormat(const char* format, ...)
+```
+
+<ParamField path="format" type="const char*" required>
+  printf-style format string
+</ParamField>
+
+<ParamField path="..." type="variadic">
+  Variable arguments matching the format specifiers
+</ParamField>
+
+Formats and sends data directly without queueing. Limited to 4096 bytes (0x1000).
+
+### Flush
+
+```cpp
+void Flush()
+```
+
+Manually flushes all queued messages by calling `SendRaw()` on each. The logger thread calls this automatically every 100ms.
+
+---
+
+## Logger Architecture
+
+### Message Queue
+
+Messages logged via `Log()` and `LogFormat()` are added to an internal queue (`std::queue<char*>`). A background thread processes this queue periodically:
+
+1. User calls `Log()` or `LogFormat()` - message is copied and queued
+2. Logger thread wakes every 100ms
+3. If `ShouldFlush()` returns `true`, all queued messages are sent via `SendRaw()`
+4. Memory for processed messages is freed
+
+### Thread Safety
+
+The logger uses a message queue to avoid blocking the main thread. Messages are queued quickly and processed asynchronously by the logger thread.
+
+---
+
+## Available Implementations
+
+<CardGroup cols={2}>
+  <Card title="TcpLogger" icon="network-wired" href="/api/logger/tcp-logger">
+    Network-based logging over TCP socket
+  </Card>
+  <Card title="SdLogger" icon="sd-card" href="/api/logger/sd-logger">
+    File-based logging to SD card
+  </Card>
+</CardGroup>
+
+---
+
+## NOLOG Build Flag
+
+When `NOLOG` is defined during compilation, all logging methods become no-op inline functions:
+
+```cpp
+#ifdef NOLOG
+    inline void StartThread() {}
+    inline void Log(const char* data, size_t size = UINT32_MAX) {}
+    inline void Log(std::string str) {}
+    inline void LogFormat(const char* format, ...) {}
+    inline void SendRaw(const char*) {}
+    inline void SendRawFormat(const char*, ...) {}
+    inline void Flush() {}
+#endif
+```
+
+This allows you to completely disable logging overhead in production builds without modifying your code.
+
+**Build without logging:**
+
+```bash
+make NOLOG=1
+```

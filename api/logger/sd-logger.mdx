@@ -1,0 +1,392 @@
+---
+title: SdLogger
+description: File-based logger that writes to SD card storage
+---
+
+## Overview
+
+`SdLogger` writes log messages to a file on the Nintendo Switch SD card. This is useful for capturing logs when network connectivity is unavailable or when you need persistent log storage.
+
+**Header:** `skyline/logger/SdLogger.hpp`
+
+## Class Definition
+
+```cpp
+namespace skyline::logger {
+    class SdLogger : public Logger {
+    public:
+        SdLogger(std::string path);
+        
+        virtual void Initialize();
+        virtual bool ShouldFlush() override;
+        virtual void SendRaw(void* data, size_t size);
+        virtual std::string FriendlyName() { return "SdLogger"; }
+    };
+}
+```
+
+---
+
+## Constructor
+
+### SdLogger
+
+```cpp
+SdLogger(std::string path)
+```
+
+<ParamField path="path" type="std::string" required>
+  Absolute path to the log file on the SD card (e.g., `"sd:/skyline.log"`)
+</ParamField>
+
+Creates an SdLogger instance that writes to the specified file path.
+
+**Behavior:**
+
+1. Checks if the path exists using `nn::fs::GetEntryType()`
+2. If path doesn't exist (result `0x202`), creates a new file with `nn::fs::CreateFile()`
+3. If path exists but is a directory, fails silently
+4. Opens the file in read-write + append mode: `OpenMode_ReadWrite | OpenMode_Append`
+
+**Example:**
+
+```cpp
+#include "skyline/logger/SdLogger.hpp"
+
+void skyline_main() {
+    // Mount SD card first
+    nn::fs::MountSdCardForDebug("sd");
+    
+    // Create logger writing to sd:/skyline/logs/output.log
+    skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/skyline/logs/output.log");
+    
+    // Start logger thread
+    skyline::logger::s_Instance->StartThread();
+    
+    // Begin logging
+    skyline::logger::s_Instance->Log("[skyline] Initialization complete\n");
+}
+```
+
+---
+
+## Class Methods
+
+### Initialize
+
+```cpp
+virtual void Initialize()
+```
+
+Empty implementation - all initialization is done in the constructor. Called by the logger thread when it starts.
+
+### ShouldFlush
+
+```cpp
+virtual bool ShouldFlush() override
+```
+
+**Returns:** Always returns `false`
+
+<Info>
+SdLogger always returns `false` from `ShouldFlush()` but messages are still written. Each `SendRaw()` call writes directly to the file with the flush flag enabled.
+</Info>
+
+This design avoids unnecessary buffering and ensures logs are immediately written to disk, which is important for debugging crashes.
+
+### SendRaw
+
+```cpp
+virtual void SendRaw(void* data, size_t size)
+```
+
+<ParamField path="data" type="void*" required>
+  Pointer to data buffer to write to the file
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to write
+</ParamField>
+
+Writes raw data directly to the log file with immediate flush.
+
+**Implementation Details:**
+
+1. Expands file size to accommodate new data: `nn::fs::SetFileSize(fileHandle, offset + size)`
+2. Writes data at current offset: `nn::fs::WriteFile(fileHandle, offset, data, size, ...)`
+3. Uses `WriteOptionFlag_Flush` to ensure data is written immediately to SD card
+4. Increments internal offset for next write
+
+```cpp
+void SdLogger::SendRaw(void* data, size_t size) {
+    nn::fs::SetFileSize(fileHandle, offset + size);
+    nn::fs::WriteFile(fileHandle, offset, data, size,
+                      nn::fs::WriteOption::CreateOption(nn::fs::WriteOptionFlag_Flush));
+    offset += size;
+}
+```
+
+### FriendlyName
+
+```cpp
+virtual std::string FriendlyName()
+```
+
+**Returns:** `"SdLogger"`
+
+---
+
+## SD Card Requirements
+
+### Mounting the SD Card
+
+<Warning>
+**You must mount the SD card before creating an SdLogger instance**, otherwise file operations will fail.
+</Warning>
+
+```cpp
+// Mount SD card with debug access
+Result rc = nn::fs::MountSdCardForDebug("sd");
+if (R_FAILED(rc)) {
+    // Handle mount failure
+}
+
+// Now create SdLogger
+skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/logs/game.log");
+```
+
+### File Path Format
+
+Paths must use the Nintendo Switch filesystem format:
+
+<CodeGroup>
+
+```cpp Valid Paths
+// Root of SD card
+"sd:/skyline.log"
+
+// Subdirectory
+"sd:/skyline/logs/debug.log"
+
+// Nested directories (must exist or be created first)
+"sd:/atmosphere/contents/01006A800016E000/romfs/skyline/logs/output.log"
+```
+
+```cpp Invalid Paths
+// Missing mount name
+"/skyline.log"
+
+// Unix-style path
+"/mnt/sd/skyline.log"
+
+// Windows-style path
+"D:\\skyline.log"
+```
+
+</CodeGroup>
+
+---
+
+## Usage Examples
+
+### Basic Usage
+
+```cpp
+#include "skyline/logger/SdLogger.hpp"
+
+void setup_sd_logging() {
+    // Mount SD card
+    nn::fs::MountSdCardForDebug("sd");
+    
+    // Create logger
+    skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/skyline_debug.log");
+    
+    // Start logger thread
+    skyline::logger::s_Instance->StartThread();
+    
+    // Log messages
+    skyline::logger::s_Instance->Log("=== Skyline Debug Log ===\n");
+    skyline::logger::s_Instance->LogFormat("Game TID: %016llX\n", titleId);
+}
+```
+
+### Creating Log Directories
+
+If your log file is in a subdirectory, create the directory structure first:
+
+```cpp
+#include "nn/fs.h"
+
+void setup_logging_with_dir() {
+    nn::fs::MountSdCardForDebug("sd");
+    
+    // Create directory if it doesn't exist
+    nn::fs::CreateDirectory("sd:/skyline");
+    nn::fs::CreateDirectory("sd:/skyline/logs");
+    
+    // Create logger in subdirectory
+    skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/skyline/logs/debug.log");
+    skyline::logger::s_Instance->StartThread();
+}
+```
+
+### Logging Game Events
+
+```cpp
+void log_game_state() {
+    auto logger = skyline::logger::s_Instance;
+    
+    logger->LogFormat("=== Frame %d ===", frameCount);
+    logger->LogFormat("Player position: (%.2f, %.2f, %.2f)", x, y, z);
+    logger->LogFormat("Health: %d/%d", currentHealth, maxHealth);
+    logger->Log("\n");
+}
+```
+
+---
+
+## Advantages and Limitations
+
+### Advantages ✅
+
+- **No network required** - Works without WiFi or network configuration
+- **Persistent storage** - Logs survive crashes and can be retrieved later
+- **Immediate writes** - Each message is flushed immediately to SD card
+- **Simple setup** - Only requires SD card mounting
+- **Post-crash analysis** - Can examine logs after the game crashes
+
+### Limitations ⚠️
+
+- **No real-time viewing** - Must remove SD card or use FTP to view logs
+- **SD card wear** - Frequent writes may reduce SD card lifespan
+- **Performance impact** - Synchronous file writes are slower than network logging
+- **Storage space** - Large logs can fill SD card space
+- **No timestamping** - Base implementation doesn't add timestamps (you must add them manually)
+
+---
+
+## Common Issues
+
+### SD Card Not Mounted
+
+**Problem:** SdLogger constructor fails silently
+
+**Solution:** Always mount SD card before creating SdLogger:
+
+```cpp
+Result rc = nn::fs::MountSdCardForDebug("sd");
+if (R_SUCCEEDED(rc)) {
+    skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/log.txt");
+} else {
+    // Fallback or error handling
+}
+```
+
+### Directory Doesn't Exist
+
+**Problem:** Log file path includes non-existent directories
+
+**Solution:** Create directories before creating the logger:
+
+```cpp
+nn::fs::CreateDirectory("sd:/skyline");
+nn::fs::CreateDirectory("sd:/skyline/logs");  // Create parent dirs first
+skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/skyline/logs/output.log");
+```
+
+### Path is a Directory
+
+**Problem:** Specified path is a directory, not a file
+
+**Solution:** Ensure the path points to a file:
+
+```cpp
+// Wrong - this is a directory
+new skyline::logger::SdLogger("sd:/skyline/");
+
+// Correct - this is a file
+new skyline::logger::SdLogger("sd:/skyline/output.log");
+```
+
+---
+
+## Advanced Usage
+
+### Adding Timestamps
+
+The base SdLogger doesn't add timestamps. You can add them manually:
+
+```cpp
+void log_with_timestamp(const char* message) {
+    nn::time::PosixTime currentTime;
+    nn::time::StandardUserSystemClock::GetCurrentTime(&currentTime);
+    
+    skyline::logger::s_Instance->LogFormat("[%lld] %s", currentTime.time, message);
+}
+```
+
+### Rotating Log Files
+
+```cpp
+void rotate_log_if_needed(const char* log_path) {
+    s64 file_size;
+    nn::fs::GetFileSize(&file_size, log_path);
+    
+    // If log exceeds 10MB, rotate it
+    if (file_size > 10 * 1024 * 1024) {
+        nn::fs::RenameFile(log_path, "sd:/skyline_old.log");
+        // Next SdLogger creation will create a new file
+    }
+}
+```
+
+### Conditional Logging
+
+```cpp
+// Use SdLogger for production, TcpLogger for development
+void setup_logger(bool is_development) {
+    nn::fs::MountSdCardForDebug("sd");
+    
+    if (is_development) {
+        skyline::logger::setup_socket_hooks();
+        skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+    } else {
+        skyline::logger::s_Instance = new skyline::logger::SdLogger("sd:/skyline_release.log");
+    }
+    
+    // Start logger thread (works for both)
+    skyline::logger::s_Instance->StartThread();
+}
+```
+
+---
+
+## Retrieving Logs
+
+### Method 1: Remove SD Card
+
+1. Power off the Switch
+2. Remove the SD card
+3. Insert SD card into PC
+4. Navigate to the log file location
+5. Copy or view the log file
+
+### Method 2: FTP Access
+
+```bash
+# Connect via FTP (requires FTP homebrew on Switch)
+ftp <switch-ip>
+cd /
+get skyline.log
+```
+
+### Method 3: ftpd Homebrew
+
+Use ftpd or similar homebrew to access SD card over network without removing it.
+
+---
+
+## See Also
+
+- [Logger Overview](/api/logger/overview) - Base logger interface and architecture
+- [TcpLogger](/api/logger/tcp-logger) - Network-based logging for real-time debugging

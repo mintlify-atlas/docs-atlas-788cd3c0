@@ -1,0 +1,229 @@
+---
+title: 'Getting Started with Plugin Development'
+description: 'Learn how to set up your development environment and create your first Skyline plugin'
+---
+
+## Introduction
+
+Skyline plugins are dynamic modules (.nro files) that extend Super Smash Bros Ultimate functionality through runtime hooking and code patching. Plugins are loaded from `atmosphere/contents/<game titleid>/romfs/skyline/plugins/` and executed at runtime.
+
+## Prerequisites
+
+<Steps>
+  <Step title="Install devkitPro">
+    Download and install [devkitPro](https://devkitpro.org/wiki/Getting_Started) with devkitA64 for ARM64 development.
+    
+    ```bash
+    # Verify installation
+    echo $DEVKITPRO
+    # Should output: /opt/devkitpro (or your installation path)
+    ```
+  </Step>
+
+  <Step title="Install Required Tools">
+    Ensure you have the following tools installed:
+    - **elf2nro**: Converts ELF executables to NRO format (included with devkitPro)
+    - **Python 3**: Required for build scripts
+    - **Make**: For building projects
+    
+    ```bash
+    # Check tools
+    which elf2nro
+    python3 --version
+    make --version
+    ```
+  </Step>
+
+  <Step title="Set Up libnx">
+    libnx should be included with devkitPro. Verify it's accessible:
+    
+    ```bash
+    ls $DEVKITPRO/libnx/include
+    ```
+  </Step>
+
+  <Step title="Clone Skyline">
+    You'll need the Skyline headers to develop plugins:
+    
+    ```bash
+    git clone https://github.com/skyline-dev/skyline.git
+    cd skyline
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Skyline's initialization method varies by game. Some games require modified versions:
+  - [Animal Crossing](https://github.com/3096/skyline)
+  - [Pokémon Sword/Shield](https://github.com/3096/skyline/tree/sword)
+  - [Persona 5 Royal](https://github.com/Raytwo/p5rcbt)
+</Note>
+
+## Creating Your First Plugin
+
+<Steps>
+  <Step title="Set Up Project Structure">
+    Create a new directory for your plugin:
+    
+    ```bash
+    mkdir my-first-plugin
+    cd my-first-plugin
+    mkdir -p source include
+    ```
+  </Step>
+
+  <Step title="Create Plugin Source">
+    Create `source/main.cpp` with a basic plugin:
+    
+    ```cpp
+    #include <cstdio>
+    
+    extern "C" void skyline_tcp_send_raw(void*, size_t);
+    
+    void log(const char* msg) {
+        skyline_tcp_send_raw((void*)msg, strlen(msg));
+    }
+    
+    extern "C" void main() {
+        log("Hello from my first Skyline plugin!\n");
+    }
+    ```
+    
+    <Info>
+      The `main()` function is the plugin entry point, called automatically by Skyline's PluginManager after loading.
+    </Info>
+  </Step>
+
+  <Step title="Create Makefile">
+    Create a `Makefile` to build your plugin:
+    
+    ```makefile
+    ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
+    
+    TARGET := my_plugin
+    SOURCES := source
+    INCLUDES := include
+    
+    CXXFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) -D__SWITCH__ \
+                -fno-rtti -fomit-frame-pointer -fno-exceptions \
+                -std=c++20
+    
+    LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
+               -Wl,-Map,$(TARGET).map -Wl,--version-script=exported.txt \
+               -shared -nodefaultlibs
+    
+    LIBS := -lgcc -lstdc++
+    
+    CFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.c))
+    CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
+    OFILES := $(CPPFILES:.cpp=.o) $(CFILES:.c=.o)
+    
+    all: $(TARGET).nro
+    
+    %.o: %.cpp
+    	$(CXX) $(CXXFLAGS) -I$(INCLUDES) -c $< -o $@
+    
+    $(TARGET).elf: $(OFILES)
+    	$(CXX) $(LDFLAGS) $(OFILES) $(LIBS) -o $@
+    
+    $(TARGET).nro: $(TARGET).elf
+    	elf2nro $< $@
+    	@echo "Built $(TARGET).nro"
+    
+    clean:
+    	@rm -f $(OFILES) $(TARGET).elf $(TARGET).nro $(TARGET).map
+    ```
+  </Step>
+
+  <Step title="Create Export File">
+    Create `exported.txt` to specify exported symbols:
+    
+    ```text
+    {
+        global:
+            main;
+        local: *;
+    };
+    ```
+    
+    <Tip>
+      Only export symbols that need to be visible to Skyline or other plugins. Keep most symbols local for better performance.
+    </Tip>
+  </Step>
+
+  <Step title="Build Your Plugin">
+    Compile the plugin:
+    
+    ```bash
+    make
+    ```
+    
+    This will produce `my_plugin.nro` that can be loaded by Skyline.
+  </Step>
+
+  <Step title="Deploy to Switch">
+    Copy the .nro file to your Switch:
+    
+    ```bash
+    # Replace <titleid> with your game's title ID
+    # For SSBU: 01006A800016E000
+    cp my_plugin.nro /path/to/sd/atmosphere/contents/<titleid>/romfs/skyline/plugins/
+    ```
+  </Step>
+</Steps>
+
+## Testing Your Plugin
+
+<Steps>
+  <Step title="Set Up TCP Logging">
+    Skyline uses TCP logging by default. Set up a listener on your PC:
+    
+    ```bash
+    # Using netcat
+    nc -l -p 6969
+    ```
+  </Step>
+
+  <Step title="Launch the Game">
+    Start the game on your Switch. Your plugin's log message should appear in the TCP listener:
+    
+    ```
+    [PluginManager] Loading plugins...
+    [PluginManager] Loaded 'rom:/skyline/plugins/my_plugin.nro'
+    [PluginManager] Running `main` for rom:/skyline/plugins/my_plugin.nro
+    Hello from my first Skyline plugin!
+    [PluginManager] Finished running `main` for 'rom:/skyline/plugins/my_plugin.nro'
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  If your plugin crashes during loading, check Atmosphere's crash logs at `atmosphere/crash_reports/` on your SD card.
+</Warning>
+
+## Next Steps
+
+Now that you have a working plugin, you can:
+- Learn about [plugin structure and advanced features](/plugins/plugin-structure)
+- Explore [real-world plugin examples](/plugins/examples)
+- Study the Skyline API headers for available functions
+
+## Troubleshooting
+
+### Plugin Not Loading
+
+- Verify the plugin path is correct: `romfs/skyline/plugins/`
+- Check that the file is a valid .nro file: `file my_plugin.nro`
+- Review Skyline logs for error messages about your plugin
+
+### Compilation Errors
+
+- Ensure `DEVKITPRO` environment variable is set
+- Verify devkitA64 is installed: `ls $DEVKITPRO/devkitA64`
+- Check that you're using C++17 or later
+
+### Runtime Crashes
+
+- Use exception handlers to catch errors (see examples)
+- Verify all hooked functions have correct signatures
+- Check that you're not accessing invalid memory addresses

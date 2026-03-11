@@ -1,0 +1,574 @@
+---
+title: Memory Management
+description: Virtual memory setup, JIT compilation, and controlled page management
+---
+
+Skyline's memory management system provides the foundation for dynamic code generation, safe memory patching, and plugin execution. It consists of three main components: virtual memory allocation, JIT (Just-In-Time) compilation support, and the controlled pages system for safe executable memory modification.
+
+## Virtual Memory System
+
+The virtual memory system provides address space management using the `virtmem` API, which wraps Nintendo Switch kernel services.
+
+### API Overview
+
+```c include/skyline/nx/kernel/virtmem.h:19-42
+void* virtmemReserve(size_t size);
+void virtmemFree(void* addr, size_t size);
+void* virtmemReserveStack(size_t size);
+void virtmemFreeStack(void* addr, size_t size);
+void virtmemSetup();
+```
+
+### Initialization
+
+Virtual memory must be set up before any JIT operations:
+
+```cpp source/main.cpp:144
+virtmemSetup();  // needed for libnx JIT
+```
+
+This function initializes the virtual memory subsystem by discovering address space regions.
+
+### Memory Region Types
+
+The Switch's address space is divided into several regions:
+
+```cpp source/skyline/inlinehook/controlledpages.cpp:26-36
+struct AddressSpaceInfo {
+    uintptr_t heap_base;
+    size_t heap_size;
+    uintptr_t heap_end;
+    uintptr_t alias_base;
+    size_t alias_size;
+    uintptr_t alias_end;
+    uintptr_t aslr_base;
+    size_t aslr_size;
+    uintptr_t aslr_end;
+};
+```
+
+<CardGroup cols={3}>
+  <Card title="Heap Region">
+    Dynamic memory allocations (malloc, new)
+  </Card>
+  <Card title="Alias Region">
+    Stack and aliased memory mappings
+  </Card>
+  <Card title="ASLR Region">
+    Main executable and loaded modules
+  </Card>
+</CardGroup>
+
+### Address Space Layout
+
+On 64-bit Switch applications:
+
+```cpp source/skyline/inlinehook/controlledpages.cpp:42-43
+static constexpr uintptr_t AslrBase64Bit = 0x0008000000ul;
+static constexpr size_t AslrSize64Bit = 0x7FF8000000ul;
+```
+
+```
+0x0000000000 - 0x0008000000: Reserved
+0x0008000000 - 0x8000000000: ASLR Region (main executable, modules)
+   ├── Game .text (executable code)
+   ├── Game .rodata (constants)
+   ├── Game .data (global variables)
+   ├── Skyline framework
+   └── Loaded plugins
+0x8000000000+: Heap and Alias regions
+```
+
+### Finding Mappable Space
+
+Before mapping memory, Skyline searches for available address space:
+
+```cpp source/skyline/inlinehook/controlledpages.cpp:64-105
+static Result locateMappableSpaceModern(uintptr_t* out_address, size_t size) {
+    MemoryInfo mem_info = {};
+    u32 page_info = 0;
+    uintptr_t cur_base = 0, cur_end = 0;
+    
+    AddressSpaceInfo address_space;
+    R_TRY(getProcessAddressSpaceInfo(&address_space, CUR_PROCESS_HANDLE));
+    cur_base = address_space.aslr_base;
+    cur_end = cur_base + size;
+    
+    while (true) {
+        if (address_space.heap_size &&
+            (address_space.heap_base <= cur_end - 1 && cur_base <= address_space.heap_end - 1)) {
+            // Skip heap region
+            cur_base = address_space.heap_end;
+        } else if (address_space.alias_size &&
+                   (address_space.alias_base <= cur_end - 1 && cur_base <= address_space.alias_end - 1)) {
+            // Skip alias region
+            cur_base = address_space.alias_end;
+        } else {
+            R_ERRORONFAIL(svcQueryMemory(&mem_info, &page_info, cur_base));
+            if (mem_info.type == 0 && mem_info.addr - cur_base + mem_info.size >= size) {
+                *out_address = cur_base;
+                return 0;
+            }
+            cur_base = mem_info.addr + mem_info.size;
+        }
+        cur_end = cur_base + size;
+    }
+}
+```
+
+This algorithm:
+1. Starts searching from the ASLR base
+2. Skips heap and alias regions
+3. Queries memory info at each candidate address
+4. Returns the first unmapped region with sufficient space
+
+## JIT Compilation Support
+
+The JIT system provides executable memory regions for dynamically generated code.
+
+### JIT Object Structure
+
+```c include/skyline/nx/kernel/jit.h:18-26
+typedef struct {
+    JitType type;
+    size_t size;
+    void* src_addr;
+    void* rx_addr;  // Read-execute alias
+    void* rw_addr;  // Read-write alias
+    bool is_executable;
+    Handle handle;
+} Jit;
+```
+
+Each JIT buffer has two views of the same memory:
+- **rx_addr**: Read-execute alias for running code
+- **rw_addr**: Read-write alias for modifying code
+
+<Info>
+This dual-mapping approach allows code to be written through `rw_addr` and executed through `rx_addr`, satisfying W^X (Write XOR Execute) security requirements.
+</Info>
+
+### JIT Types
+
+```c include/skyline/nx/kernel/jit.h:11-15
+typedef enum {
+    JitType_CodeMemory,  // Using svcSetProcessMemoryPermission
+    JitType_JitMemory,   // Using code-memory syscalls (4.0.0+)
+} JitType;
+```
+
+Skyline uses `JitType_CodeMemory` on modern firmware versions.
+
+### JIT API
+
+<CodeGroup>
+```c Create JIT Buffer
+Result jitCreate(Jit* j, void* src_addr, size_t size);
+```
+
+```c Transition to Writable
+Result jitTransitionToWritable(Jit* j);
+```
+
+```c Transition to Executable
+Result jitTransitionToExecutable(Jit* j);
+```
+
+```c Destroy JIT Buffer
+Result jitClose(Jit* j);
+```
+</CodeGroup>
+
+### Usage Example from Hook System
+
+```cpp source/skyline/inlinehook/And64InlineHook.cpp:530-534
+// Allocate JIT buffer
+Result rc = jitCreate(&__insns_jit, NULL, sizeof(insns_t));
+R_ERRORONFAIL(rc);
+
+// Clear contents
+memset(__insns_jit.rw_addr, 0, __insns_jit.size);
+
+// Make executable
+rc = jitTransitionToExecutable(&__insns_jit);
+R_ERRORONFAIL(rc);
+```
+
+### JIT Memory Transitions
+
+JIT buffers can be toggled between writable and executable:
+
+```cpp source/skyline/inlinehook/And64InlineHook.cpp:648
+// Make writable for modifications
+R_ERRORONFAIL(jitTransitionToWritable(&__insns_jit));
+
+// Write code...
+uint32_t* code = (uint32_t*)__insns_jit.rw_addr;
+code[0] = 0xd503201f;  // NOP instruction
+
+// Make executable for running
+R_ERRORONFAIL(jitTransitionToExecutable(&__insns_jit));
+```
+
+<Warning>
+Always transition JIT buffers to executable before executing code from them. Attempting to execute from writable memory will crash.
+</Warning>
+
+## Controlled Pages System
+
+The controlled pages system provides safe, temporary read-write access to executable memory for patching.
+
+### Class Definition
+
+```cpp include/skyline/inlinehook/controlledpages.hpp:7-20
+namespace skyline::inlinehook {
+class ControlledPages {
+   private:
+    bool isClaimed;
+    size_t size;
+    
+   public:
+    void* rx;  // Original read-execute address
+    void* rw;  // Temporary read-write mapping
+    
+    ControlledPages(void* addr, size_t size);
+    void claim();
+    void unclaim();
+};
+};
+```
+
+### How It Works
+
+<Steps>
+  <Step title="Create ControlledPages Object">
+    ```cpp
+    skyline::inlinehook::ControlledPages control(
+        original_function,     // Address to patch
+        5 * sizeof(uint32_t)   // Size to patch
+    );
+    ```
+    
+    Stores the target address and size for later mapping.
+  </Step>
+  
+  <Step title="Claim - Create RW Mapping">
+    ```cpp source/skyline/inlinehook/controlledpages.cpp:117-139
+    void ControlledPages::claim() {
+        if (!isClaimed) {
+            // Align to page boundaries
+            u64 alignedSrc = ALIGN_DOWN((u64)rx, PAGE_SIZE);
+            size_t alignedSize = ALIGN_UP(size, PAGE_SIZE);
+            
+            // Find free address space
+            u64 dst;
+            R_ERRORONFAIL(locateMappableSpace(&dst, alignedSize));
+            
+            // Map pages as read-write
+            R_ERRORONFAIL(svcMapProcessMemory(
+                (void*)dst, 
+                skyline::proc_handle::Get(), 
+                alignedSrc, 
+                alignedSize
+            ));
+            
+            // Calculate RW pointer
+            rw = (void*)(dst + ((s64)rx - alignedSrc));
+            isClaimed = true;
+            
+            // Sanity check
+            if (*(u64*)rx != *(u64*)rw) {
+                R_ERRORONFAIL(-1);
+            }
+        }
+    }
+    ```
+    
+    This creates a writable mirror of the executable page at a new address.
+  </Step>
+  
+  <Step title="Modify Memory">
+    ```cpp
+    control.claim();
+    
+    // Now we can write to executable memory
+    uint32_t* writable = (uint32_t*)control.rw;
+    writable[0] = 0x58000051;  // LDR X17, #0x8
+    writable[1] = 0xd61f0220;  // BR X17
+    memcpy(writable + 2, &target_addr, sizeof(target_addr));
+    ```
+  </Step>
+  
+  <Step title="Unclaim - Flush and Unmap">
+    ```cpp source/skyline/inlinehook/controlledpages.cpp:141-159
+    void ControlledPages::unclaim() {
+        if (isClaimed) {
+            u64 alignedSrc = ALIGN_DOWN((u64)rx, PAGE_SIZE);
+            void* alignedDst = (void*)ALIGN_DOWN((u64)rw, PAGE_SIZE);
+            size_t alignedSize = ALIGN_UP(size, PAGE_SIZE);
+            
+            // Flush data cache (write changes to memory)
+            armDCacheFlush((void*)alignedDst, size);
+            
+            // Invalidate instruction cache (ensure CPU sees changes)
+            armICacheInvalidate((void*)alignedSrc, size);
+            
+            // Unmap the writable alias
+            R_ERRORONFAIL(svcUnmapProcessMemory(
+                alignedDst, 
+                skyline::proc_handle::Get(), 
+                alignedSrc, 
+                alignedSize
+            ));
+            
+            rw = NULL;
+            isClaimed = false;
+        }
+    }
+    ```
+    
+    Critical steps:
+    1. **Data cache flush**: Writes changes from cache to RAM
+    2. **Instruction cache invalidate**: Clears old instructions from CPU
+    3. **Unmap**: Removes the writable alias
+  </Step>
+</Steps>
+
+### Why Cache Management Matters
+
+Modern CPUs have separate instruction and data caches:
+
+```
+CPU Core
+├── Instruction Cache (I-Cache)
+│   └── Caches instructions for execution
+└── Data Cache (D-Cache)
+    └── Caches data for reads/writes
+```
+
+When you write new instructions:
+1. Writes go to D-Cache first
+2. `armDCacheFlush` forces D-Cache to write to RAM
+3. I-Cache may still contain old instructions
+4. `armICacheInvalidate` clears I-Cache
+5. CPU re-fetches instructions from RAM
+
+<Warning>
+**Forgetting cache operations will cause:**
+- CPU executing old instructions (I-Cache not invalidated)
+- Changes not visible in memory (D-Cache not flushed)
+- Seemingly random behavior
+</Warning>
+
+### Usage in Hook Installation
+
+From `source/skyline/inlinehook/And64InlineHook.cpp:581-611`:
+
+```cpp
+void* A64HookFunctionV(void* const symbol, void* const replace, ...) {
+    uint32_t* original = static_cast<uint32_t*>(symbol);
+    
+    // Determine how many instructions we need to overwrite
+    int32_t count = (reinterpret_cast<uint64_t>(original + 2) & 7u) != 0u ? 5 : 4;
+    
+    // Create controlled pages for safe writing
+    skyline::inlinehook::ControlledPages control(original, count * sizeof(uint32_t));
+    control.claim();
+    
+    // Get writable pointer
+    original = (u32*)control.rw;
+    
+    // Build trampoline if requested
+    if (rxtrampoline) {
+        __fix_instructions(original, (u32*)control.rx, count, rwtrampoline, rxtrampoline);
+    }
+    
+    // Write hook code
+    if (count == 5) {
+        original[0] = A64_NOP;
+        ++original;
+    }
+    original[0] = 0x58000051u;  // LDR X17, #0x8
+    original[1] = 0xd61f0220u;  // BR X17
+    *reinterpret_cast<int64_t*>(original + 2) = __intval(replace);
+    
+    // Flush caches (done in unclaim)
+    control.unclaim();
+    
+    return rxtrampoline;
+}
+```
+
+## Memory Allocation for Plugins
+
+Plugins require properly aligned memory for their sections:
+
+### NRO Data Section
+
+```cpp source/skyline/plugin/PluginManager.cpp:68
+plugin.Data = std::unique_ptr<u8>((u8*)memalign(0x1000, plugin.Size));
+```
+
+- Aligned to 0x1000 (4KB page boundary)
+- Stores the entire NRO file
+
+### BSS Section
+
+```cpp source/skyline/plugin/PluginManager.cpp:163
+plugin.BssData = std::unique_ptr<u8>((u8*)memalign(0x1000, plugin.BssSize));
+```
+
+- Separate allocation for uninitialized data
+- Also page-aligned for memory protection
+
+<Info>
+Page alignment (0x1000 bytes) is required because:
+- Memory protection works at page granularity
+- `svcMapProcessMemory` requires page-aligned addresses
+- Nintendo's `nn::ro` loader expects aligned sections
+</Info>
+
+## Memory Protection and Permissions
+
+The Switch kernel enforces memory permissions:
+
+| Permission | Symbol | Description |
+|------------|--------|-------------|
+| Read | R | Can read memory |
+| Write | W | Can write memory |
+| Execute | X | Can execute as code |
+
+<Warning>
+**W^X Policy (Write XOR Execute):**
+The kernel generally prevents pages from being both writable and executable simultaneously. This is why we need:
+- JIT buffers with separate RW/RX mappings
+- Controlled pages for temporary RW access
+- Cache flushes after writing code
+</Warning>
+
+### Typical Memory Permissions
+
+```
+Game .text section:     R-X  (read and execute, not writable)
+Game .rodata section:   R--  (read-only)
+Game .data section:     RW-  (read-write, not executable)
+JIT RW mapping:         RW-  (for writing code)
+JIT RX mapping:         R-X  (for executing code)
+Controlled RW mapping:  RW-  (temporary for patching)
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Virtual Memory Allocation">
+    - Always call `virtmemSetup()` during initialization
+    - Check return values from `virtmemReserve`
+    - Free memory with `virtmemFree` when done
+    - Use `virtmemReserveStack` for stack-like memory
+    
+    ```cpp
+    void* addr = virtmemReserve(0x100000);  // Reserve 1MB
+    if (addr) {
+        // Use the memory
+        virtmemFree(addr, 0x100000);
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="JIT Buffer Management">
+    - Create JIT buffers during initialization, not per-operation
+    - Always transition to writable before writing
+    - Always transition to executable before executing
+    - Don't forget to call `jitTransitionToExecutable` after modifications
+    
+    ```cpp
+    // WRONG - writing to executable memory
+    uint32_t* code = (uint32_t*)jit.rx_addr;
+    code[0] = 0xd503201f;  // May crash or be ignored
+    
+    // CORRECT
+    jitTransitionToWritable(&jit);
+    uint32_t* code = (uint32_t*)jit.rw_addr;
+    code[0] = 0xd503201f;
+    jitTransitionToExecutable(&jit);
+    ```
+  </Accordion>
+  
+  <Accordion title="Controlled Pages Usage">
+    - Keep claim/unclaim sections as short as possible
+    - Always unclaim in the same function that claimed
+    - Use RAII wrappers for automatic unclaiming
+    - Don't hold controlled pages across async operations
+    
+    ```cpp
+    // Good: Short-lived controlled pages
+    void patchFunction(void* addr) {
+        skyline::inlinehook::ControlledPages control(addr, 4);
+        control.claim();
+        
+        // Quick modifications
+        *(uint32_t*)control.rw = 0xd503201f;
+        
+        control.unclaim();
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Cache Coherency">
+    - Always flush data cache after writing code
+    - Always invalidate instruction cache before executing
+    - Use `armDCacheFlush` and `armICacheInvalidate`
+    - These are automatically handled by `ControlledPages::unclaim()`
+    
+    ```cpp
+    // If manually managing memory
+    armDCacheFlush(code_addr, code_size);
+    armICacheInvalidate(code_addr, code_size);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Debugging Memory Issues
+
+### Common Symptoms and Causes
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| Crash on code modification | Writing to RX memory | Use controlled pages |
+| Old code still executing | Instruction cache not invalidated | Call `armICacheInvalidate` |
+| Changes not visible | Data cache not flushed | Call `armDCacheFlush` |
+| JIT code crashes | Not transitioned to executable | Call `jitTransitionToExecutable` |
+| Memory mapping fails | Not page-aligned | Use `memalign(0x1000, size)` |
+| Address space exhausted | Not freeing mappings | Call `unclaim()` or `virtmemFree` |
+
+### Memory Debugging Tips
+
+```cpp
+// Log memory addresses for debugging
+skyline::logger::s_Instance->LogFormat(
+    "RX addr: %p, RW addr: %p\\n",
+    control.rx,
+    control.rw
+);
+
+// Verify memory contents match
+if (memcmp(control.rx, control.rw, size) != 0) {
+    skyline::logger::s_Instance->Log("Memory contents don't match!\\n");
+}
+
+// Check alignment
+if ((uintptr_t)addr & 0xFFF) {
+    skyline::logger::s_Instance->Log("Address not page-aligned!\\n");
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Hooking System" icon="link" href="/core/hooking-system">
+    See how hooks use controlled pages
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/core/architecture">
+    Understand the overall system design
+  </Card>
+</CardGroup>

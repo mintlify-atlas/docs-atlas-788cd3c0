@@ -1,0 +1,126 @@
+---
+title: 'Introduction'
+description: 'Learn about Skyline, a runtime hooking and code patching framework for Super Smash Bros. Ultimate'
+---
+
+# What is Skyline?
+
+Skyline is an environment for **linking, runtime hooking, and code patching** in Super Smash Bros. Ultimate on Nintendo Switch. It enables developers to create plugins that can modify game behavior, hook functions, and extend functionality without modifying the game's original code.
+
+Skyline runs as a layer between the game and the Atmosphere custom firmware, intercepting function calls and loading custom code at runtime.
+
+## Architecture
+
+Skyline operates through several key components:
+
+### Plugin Loading System
+
+The **PluginManager** (`skyline/plugin/PluginManager.hpp:13`) manages the entire plugin lifecycle:
+
+- Recursively walks the `romfs:/skyline/plugins` directory to discover NRO plugin files
+- Validates plugin files and calculates SHA256 hashes for registration
+- Uses Nintendo's `nn::ro` (relocatable object) module system to load plugins dynamically
+- Executes each plugin's `main()` function as an entry point after loading
+
+Plugins are loaded from: `atmosphere/contents/<game titleid>/romfs/skyline/plugins/`
+
+### Runtime Hooking
+
+Skyline uses **And64InlineHook** (`skyline/inlinehook/And64InlineHook.hpp:58`) for ARM64 function hooking:
+
+- `A64HookFunction()` - Redirects function calls to custom implementations while preserving the original
+- `A64InlineHook()` - Injects code directly into the instruction stream
+- Supports up to 2048 simultaneous hooks (`A64_MAX_BACKUPS`)
+
+Hooks are installed during initialization in `source/main.cpp:106` after calling `A64HookInit()`.
+
+### Logger System
+
+Skyline provides multiple logging backends (`skyline/logger/Logger.hpp:14`):
+
+- **TcpLogger** - Network logging over TCP sockets (default)
+- **SdLogger** - Writes logs to SD card files
+- **KernelLogger** - Low-level kernel debug output
+- **DummyLogger** - No-op logger for production builds
+
+The logger is initialized early in `source/main.cpp:112` and is available globally via `skyline::logger::s_Instance`.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Dynamic Plugin Loading" icon="plug">
+    Load NRO plugins at runtime without rebuilding the game. Plugins are automatically discovered and executed.
+  </Card>
+  
+  <Card title="Function Hooking" icon="link">
+    Intercept and replace any game function using ARM64 inline hooks. Access original function implementations.
+  </Card>
+  
+  <Card title="Memory Patching" icon="wrench">
+    Direct memory access and patching with controlled page management and JIT compilation support.
+  </Card>
+  
+  <Card title="Exception Handling" icon="shield">
+    Custom exception handler captures crashes and dumps register states to the logger for debugging.
+  </Card>
+  
+  <Card title="Nintendo NN SDK" icon="code">
+    Full access to Nintendo's nn SDK including filesystem, networking, graphics, and system services.
+  </Card>
+  
+  <Card title="Development Tools" icon="terminal">
+    Built-in logging, debugging utilities, and task queue system for asynchronous operations.
+  </Card>
+</CardGroup>
+
+## Relationship to OdysseyReversed and Starlight
+
+Skyline is **derived from OdysseyReversed and Starlight**, projects originally created for Super Mario Odyssey modding. The framework was adapted and extended by contributors including:
+
+- **shibbo** - Original OdysseyReversed implementation
+- **shadowninja108** - Core Skyline development
+- **3096** - Game-specific ports and compatibility
+- **Thog** - rtld (runtime loader) expertise
+- **jakibaki** - Runtime hooking advice
+
+Skyline inherits the plugin architecture and hooking system from these projects while adding Super Smash Bros. Ultimate specific features.
+
+## Game Compatibility
+
+While Skyline was designed for **Super Smash Bros. Ultimate** (Title ID: `01006A800016E000`), it has been ported to other games:
+
+<Warning>
+Skyline's initialization method is not compatible with every game out of the box. Different games may require modified versions of Skyline.
+</Warning>
+
+**Known Ports:**
+- [Animal Crossing: New Horizons](https://github.com/3096/skyline)
+- [Pokémon Sword/Shield](https://github.com/3096/skyline/tree/sword)
+- [Xenoblade Chronicles: Definitive Edition](https://github.com/3096/skyline/tree/xde)
+- [Dragon Quest XI S](https://github.com/3096/skyline/tree/jack)
+- [Persona 5 Royal](https://github.com/Raytwo/p5rcbt)
+- [Persona 5 Strikers](https://github.com/Raytwo/masquerade-rs)
+- [Fire Emblem: Three Houses](https://github.com/three-houses-research-team/aldebaran-rs)
+
+## Technical Requirements
+
+- **Nintendo Switch** running Atmosphere CFW
+- **Super Smash Bros. Ultimate** (or compatible game)
+- **devkitA64** toolchain for building plugins
+- **libnx** for Switch development libraries
+
+<Info>
+The `main.npdm` file in Skyline's exefs directory is specifically configured for Super Smash Bros. Ultimate. Other games require their own npdm files created with HACTool and npdmtool.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Skyline on your Nintendo Switch
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Create your first Skyline plugin
+  </Card>
+</CardGroup>

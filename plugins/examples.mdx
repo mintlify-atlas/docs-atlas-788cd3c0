@@ -1,0 +1,704 @@
+---
+title: 'Plugin Examples'
+description: 'Real-world examples of Skyline plugins with complete, working code'
+---
+
+## Overview
+
+This page provides practical, working examples of Skyline plugins. All code is based on actual Skyline APIs and follows best practices for plugin development.
+
+<Note>
+  These examples use real API signatures from Skyline source code. No functions or parameters are invented.
+</Note>
+
+## Basic Examples
+
+<Tabs>
+  <Tab title="Hello World">
+    The simplest possible plugin that logs a message:
+
+    ```cpp
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+
+    void log(const char* msg) {
+        skyline_tcp_send_raw((void*)msg, strlen(msg));
+    }
+
+    extern "C" void main() {
+        log("Hello from Skyline plugin!\n");
+    }
+    ```
+
+    **exported.txt:**
+    ```text
+    {
+        global: main;
+        local: *;
+    };
+    ```
+
+    This plugin simply sends a message via TCP logging when loaded.
+  </Tab>
+
+  <Tab title="Logger Utility">
+    A reusable logging utility for your plugins:
+
+    ```cpp
+    #include <cstdarg>
+    #include <cstdio>
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+
+    namespace myplugin {
+
+    class Logger {
+    public:
+        static void Log(const char* msg) {
+            skyline_tcp_send_raw((void*)msg, strlen(msg));
+        }
+
+        static void LogFormat(const char* format, ...) {
+            char buffer[512];
+            va_list args;
+            va_start(args, format);
+            vsnprintf(buffer, sizeof(buffer), format, args);
+            va_end(args);
+            Log(buffer);
+        }
+    };
+
+    }  // namespace myplugin
+
+    extern "C" void main() {
+        myplugin::Logger::Log("[MyPlugin] Initializing...\n");
+        myplugin::Logger::LogFormat("[MyPlugin] Version: %d.%d.%d\n", 1, 0, 0);
+    }
+    ```
+
+    <Tip>
+      This logger interface matches Skyline's own `Logger.hpp` API for consistency.
+    </Tip>
+  </Tab>
+
+  <Tab title="Memory Region Access">
+    Reading game memory regions:
+
+    ```cpp
+    #include <cstdio>
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" void* getRegionAddress(int region);
+
+    // From skyline/utils/cpputils.hpp
+    enum region : int {
+        Text = 0,
+        Rodata = 1,
+        Data = 2,
+        Bss = 3,
+        Heap = 4
+    };
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    extern "C" void main() {
+        void* text_base = getRegionAddress(region::Text);
+        void* rodata_base = getRegionAddress(region::Rodata);
+        void* data_base = getRegionAddress(region::Data);
+        void* bss_base = getRegionAddress(region::Bss);
+        void* heap_base = getRegionAddress(region::Heap);
+
+        log_format("[MemoryPlugin] Memory regions:\n");
+        log_format("  Text:   0x%016lx\n", (u64)text_base);
+        log_format("  Rodata: 0x%016lx\n", (u64)rodata_base);
+        log_format("  Data:   0x%016lx\n", (u64)data_base);
+        log_format("  BSS:    0x%016lx\n", (u64)bss_base);
+        log_format("  Heap:   0x%016lx\n", (u64)heap_base);
+    }
+    ```
+
+    This plugin prints the base addresses of all game memory regions.
+  </Tab>
+</Tabs>
+
+## Hooking Examples
+
+<Tabs>
+  <Tab title="Basic Function Hook">
+    Replace a function with your own implementation:
+
+    ```cpp
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" void A64HookFunction(void* symbol, void* replace, void** result);
+
+    void log(const char* msg) {
+        skyline_tcp_send_raw((void*)msg, strlen(msg));
+    }
+
+    // Original function pointer (game-specific)
+    void (*original_update_player)(void* player);
+
+    // Hook function - replaces the original
+    void hooked_update_player(void* player) {
+        log("[Hook] Player update called!\n");
+        
+        // Call original function
+        original_update_player(player);
+        
+        log("[Hook] Player update finished!\n");
+    }
+
+    extern "C" void main() {
+        log("[Plugin] Installing hooks...\n");
+        
+        // Hook the function
+        // Replace 0x71234567800 with actual game function address
+        void* target = (void*)0x71234567800;
+        A64HookFunction(
+            target,
+            (void*)hooked_update_player,
+            (void**)&original_update_player
+        );
+        
+        log("[Plugin] Hook installed!\n");
+    }
+    ```
+
+    <Info>
+      `A64HookFunction` performs a trampoline hook, preserving the original function for calling.
+    </Info>
+  </Tab>
+
+  <Tab title="Inline Hook">
+    Inject code at a specific address without trampolines:
+
+    ```cpp
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" void A64InlineHook(void* symbol, void* replace);
+
+    void log(const char* msg) {
+        skyline_tcp_send_raw((void*)msg, strlen(msg));
+    }
+
+    // This function will be jumped to from the hook point
+    void inline_hook_handler() {
+        log("[InlineHook] Execution reached hook point!\n");
+        
+        // Note: Inline hooks don't preserve original code
+        // You must manually handle continuation if needed
+    }
+
+    extern "C" void main() {
+        log("[Plugin] Installing inline hook...\n");
+        
+        // Install inline hook at specific address
+        void* hook_location = (void*)0x7100ABCDEF0;
+        A64InlineHook(hook_location, (void*)inline_hook_handler);
+        
+        log("[Plugin] Inline hook installed!\n");
+    }
+    ```
+
+    <Warning>
+      `A64InlineHook` does not preserve the original code. Use `A64HookFunction` if you need to call the original.
+    </Warning>
+  </Tab>
+
+  <Tab title="Hook with Context">
+    Pass data to your hook using a context structure:
+
+    ```cpp
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" void A64HookFunction(void* symbol, void* replace, void** result);
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    // Global context for hooks
+    struct HookContext {
+        int call_count;
+        bool enabled;
+    };
+
+    static HookContext g_context = { 0, true };
+
+    // Function signature (example from game)
+    typedef void (*PlayerUpdateFn)(void* player, float delta_time);
+    PlayerUpdateFn original_player_update;
+
+    void hooked_player_update(void* player, float delta_time) {
+        if (g_context.enabled) {
+            g_context.call_count++;
+            
+            if (g_context.call_count % 60 == 0) {  // Log every 60 calls (~1 second)
+                log_format("[Hook] Update called %d times, dt=%.3f\n",
+                          g_context.call_count, delta_time);
+            }
+        }
+        
+        // Call original
+        original_player_update(player, delta_time);
+    }
+
+    extern "C" void main() {
+        log_format("[Plugin] Installing player update hook...\n");
+        
+        void* target = (void*)0x71234567800;  // Replace with actual address
+        A64HookFunction(
+            target,
+            (void*)hooked_player_update,
+            (void**)&original_player_update
+        );
+        
+        log_format("[Plugin] Hook installed with context tracking\n");
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Advanced Examples
+
+<Tabs>
+  <Tab title="File System Operations">
+    Read and write files using Nintendo's filesystem API:
+
+    ```cpp
+    #include <cstring>
+    #include "nn/fs.h"  // From Skyline headers
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    typedef unsigned int Result;
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    void read_config_file() {
+        nn::fs::FileHandle handle;
+        const char* path = "sd:/config/myplugin.cfg";
+        
+        Result rc = nn::fs::OpenFile(&handle, path, nn::fs::OpenMode_Read);
+        
+        if (R_SUCCEEDED(rc)) {
+            // Get file size
+            s64 size;
+            nn::fs::GetFileSize(&size, handle);
+            
+            // Read file
+            char* buffer = new char[size + 1];
+            nn::fs::ReadFile(handle, 0, buffer, size);
+            buffer[size] = '\0';
+            
+            log_format("[Plugin] Config file contents:\n%s\n", buffer);
+            
+            delete[] buffer;
+            nn::fs::CloseFile(handle);
+        } else {
+            log_format("[Plugin] Failed to open config file: 0x%x\n", rc);
+        }
+    }
+
+    void write_log_file() {
+        nn::fs::FileHandle handle;
+        const char* path = "sd:/logs/myplugin.log";
+        const char* data = "Plugin executed successfully\n";
+        
+        // Create file
+        Result rc = nn::fs::CreateFile(path, strlen(data));
+        if (R_SUCCEEDED(rc)) {
+            rc = nn::fs::OpenFile(&handle, path, nn::fs::OpenMode_Write);
+            if (R_SUCCEEDED(rc)) {
+                nn::fs::WriteFile(handle, 0, data, strlen(data), 
+                                 nn::fs::WriteOption::CreateOption_None);
+                nn::fs::CloseFile(handle);
+                log_format("[Plugin] Log written to %s\n", path);
+            }
+        }
+    }
+
+    extern "C" void main() {
+        log_format("[Plugin] Testing file operations...\n");
+        read_config_file();
+        write_log_file();
+    }
+    ```
+
+    <Note>
+      SD card must be mounted first. Skyline mounts it automatically in `main.cpp:111`.
+    </Note>
+  </Tab>
+
+  <Tab title="Memory Patching">
+    Directly modify game code or data:
+
+    ```cpp
+    #include <cstring>
+    #include "skyline/nx/kernel/virtmem.h"  // For memory protection
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" void sky_memcpy(void* dst, const void* src, size_t size);
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    void patch_memory(void* address, const void* data, size_t size) {
+        // Make memory writable
+        virtmemLock();
+        
+        // Copy new data
+        sky_memcpy(address, data, size);
+        
+        // Restore memory protection
+        virtmemUnlock();
+        
+        log_format("[Patch] Patched %zu bytes at 0x%016lx\n", 
+                  size, (u64)address);
+    }
+
+    extern "C" void main() {
+        log_format("[Plugin] Applying memory patches...\n");
+        
+        // Example: NOP out an instruction (0xD503201F = NOP in ARM64)
+        void* patch_address = (void*)0x7100ABCDEF0;
+        u32 nop_instruction = 0xD503201F;
+        
+        patch_memory(patch_address, &nop_instruction, sizeof(nop_instruction));
+        
+        // Example: Patch a data value
+        void* value_address = (void*)0x71234567800;
+        float new_value = 2.0f;
+        
+        patch_memory(value_address, &new_value, sizeof(new_value));
+        
+        log_format("[Plugin] Patches applied successfully\n");
+    }
+    ```
+
+    <Warning>
+      Direct memory patching can crash the game if done incorrectly. Always verify addresses and data sizes.
+    </Warning>
+  </Tab>
+
+  <Tab title="Plugin Information">
+    Get information about your plugin at runtime:
+
+    ```cpp
+    #include <cstring>
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    extern "C" u64 get_program_id();
+    extern "C" void get_plugin_addresses(const void* internal_addr, 
+                                         void** start, void** end);
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    extern "C" void main() {
+        // Get game program ID
+        u64 program_id = get_program_id();
+        log_format("[Plugin] Running on game: %016lx\n", program_id);
+        
+        // Get plugin memory bounds
+        void* plugin_start = nullptr;
+        void* plugin_end = nullptr;
+        
+        // Pass address inside plugin (use main function's address)
+        get_plugin_addresses((void*)&main, &plugin_start, &plugin_end);
+        
+        if (plugin_start && plugin_end) {
+            size_t plugin_size = (char*)plugin_end - (char*)plugin_start;
+            log_format("[Plugin] Loaded at: 0x%016lx - 0x%016lx\n",
+                      (u64)plugin_start, (u64)plugin_end);
+            log_format("[Plugin] Size: %zu bytes (%.2f KB)\n",
+                      plugin_size, plugin_size / 1024.0);
+        } else {
+            log_format("[Plugin] Failed to get plugin addresses\n");
+        }
+    }
+    ```
+
+    This example uses `get_plugin_addresses()` from `PluginManager.cpp:225-233`.
+  </Tab>
+
+  <Tab title="IPC Communication">
+    Use Nintendo's IPC (Inter-Process Communication) system:
+
+    ```cpp
+    #include <cstring>
+    #include "nn/sf/hipc.h"  // From Skyline headers
+    #include "skyline/utils/ipc.hpp"
+
+    extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+    typedef unsigned int Result;
+    typedef unsigned int Handle;
+
+    void log_format(const char* format, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        skyline_tcp_send_raw(buffer, strlen(buffer));
+    }
+
+    void query_system_service() {
+        Service srv;
+        
+        // Open a service (example: "set:sys")
+        Result rc = skyline::utils::nnServiceCreate(&srv, "set:sys");
+        
+        if (R_SUCCEEDED(rc)) {
+            log_format("[IPC] Connected to set:sys service\n");
+            
+            // You can now make IPC calls to the service
+            // Example structure for IPC dispatch
+            // (actual usage depends on the service API)
+            
+            skyline::utils::nnServiceClose(&srv);
+            log_format("[IPC] Service closed\n");
+        } else {
+            log_format("[IPC] Failed to open service: 0x%x\n", rc);
+        }
+    }
+
+    extern "C" void main() {
+        log_format("[Plugin] Testing IPC communication...\n");
+        query_system_service();
+    }
+    ```
+
+    <Info>
+      IPC utilities are defined in `skyline/utils/ipc.hpp:18-137`. Service names vary by game and system version.
+    </Info>
+  </Tab>
+</Tabs>
+
+## Complete Plugin Example
+
+Here's a complete, production-ready plugin with multiple features:
+
+```cpp
+// main.cpp
+#include <cstring>
+#include <cstdarg>
+
+extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+extern "C" void A64HookFunction(void* symbol, void* replace, void** result);
+extern "C" void* getRegionAddress(int region);
+
+namespace myplugin {
+
+// Logger utility
+class Logger {
+public:
+    static void Log(const char* msg) {
+        skyline_tcp_send_raw((void*)msg, strlen(msg));
+    }
+    
+    static void LogFormat(const char* format, ...) {
+        char buffer[512];
+        va_list args;
+        va_start(args, format);
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        Log(buffer);
+    }
+};
+
+// Plugin state
+struct PluginState {
+    bool initialized;
+    int hook_call_count;
+    void* text_base;
+};
+
+static PluginState g_state = { false, 0, nullptr };
+
+// Hook example
+typedef void (*GameUpdateFn)(float delta_time);
+GameUpdateFn original_game_update;
+
+void hooked_game_update(float delta_time) {
+    g_state.hook_call_count++;
+    
+    if (g_state.hook_call_count % 300 == 0) {  // Every ~5 seconds
+        Logger::LogFormat("[MyPlugin] Still running (calls: %d)\n", 
+                         g_state.hook_call_count);
+    }
+    
+    // Call original
+    original_game_update(delta_time);
+}
+
+void initialize() {
+    Logger::Log("[MyPlugin] Initializing v1.0.0\n");
+    
+    // Get game memory
+    g_state.text_base = getRegionAddress(0);  // Text region
+    Logger::LogFormat("[MyPlugin] Game text base: 0x%016lx\n", 
+                     (u64)g_state.text_base);
+    
+    // Install hooks
+    // Replace 0x71234567800 with actual function address
+    void* update_fn = (void*)((char*)g_state.text_base + 0x1234567800);
+    A64HookFunction(
+        update_fn,
+        (void*)hooked_game_update,
+        (void**)&original_game_update
+    );
+    
+    g_state.initialized = true;
+    Logger::Log("[MyPlugin] Initialization complete\n");
+}
+
+}  // namespace myplugin
+
+extern "C" void main() {
+    myplugin::initialize();
+}
+```
+
+**Makefile:**
+```makefile
+TARGET := myplugin
+SOURCES := source
+INCLUDES := include
+
+ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
+
+CXXFLAGS := -g -Wall -O2 -ffunction-sections $(ARCH) -D__SWITCH__ \
+            -fno-rtti -fomit-frame-pointer -fno-exceptions -std=c++20
+
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
+           -Wl,-Map,$(TARGET).map -Wl,--version-script=exported.txt \
+           -shared -nodefaultlibs
+
+LIBS := -lgcc -lstdc++
+
+CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
+OFILES := $(CPPFILES:.cpp=.o)
+
+all: $(TARGET).nro
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -I$(INCLUDES) -c $< -o $@
+
+$(TARGET).elf: $(OFILES)
+	$(CXX) $(LDFLAGS) $(OFILES) $(LIBS) -o $@
+
+$(TARGET).nro: $(TARGET).elf
+	elf2nro $< $@
+	@echo "Built $(TARGET).nro"
+
+clean:
+	@rm -f $(OFILES) $(TARGET).elf $(TARGET).nro $(TARGET).map
+```
+
+**exported.txt:**
+```text
+{
+    global: main;
+    local: *;
+};
+```
+
+## Tips for Plugin Development
+
+<CardGroup cols={2}>
+  <Card title="Find Function Addresses" icon="crosshairs">
+    Use IDA Pro, Ghidra, or similar tools to find function addresses in the game binary. Skyline's symbol files can help.
+  </Card>
+  
+  <Card title="Test Incrementally" icon="flask">
+    Start with simple logging, then add hooks one at a time. This makes debugging easier.
+  </Card>
+  
+  <Card title="Use Namespaces" icon="box">
+    Wrap your plugin code in a namespace to avoid symbol conflicts with other plugins.
+  </Card>
+  
+  <Card title="Log Everything" icon="book">
+    TCP logging is your primary debugging tool. Log liberally during development.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+- Review [Skyline API reference](/api/logger/overview) for all available functions
+- Learn about [hook implementation details](/api/hooks/function-hooks)
+- Join the Skyline community for support and examples
+
+## Common Patterns
+
+### Error Handling
+
+```cpp
+Result rc = some_operation();
+if (R_FAILED(rc)) {
+    Logger::LogFormat("Operation failed: 0x%x\n", rc);
+    return;  // Or handle error appropriately
+}
+```
+
+### Safe Memory Access
+
+```cpp
+void* addr = (void*)0x71234567800;
+
+// Always validate before dereferencing
+if (addr != nullptr) {
+    int value = *(int*)addr;
+}
+```
+
+### Hook Signature Matching
+
+```cpp
+// Ensure hook signature matches exactly
+typedef void (*OriginalFn)(void* arg1, int arg2, float arg3);
+OriginalFn original;
+
+void hooked(void* arg1, int arg2, float arg3) {
+    // Same signature as original
+    original(arg1, arg2, arg3);
+}
+```

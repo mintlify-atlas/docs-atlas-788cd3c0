@@ -1,0 +1,581 @@
+---
+title: 'SafeQueue & SafeTaskQueue'
+description: 'Thread-safe queue implementations for task scheduling and concurrent operations'
+---
+
+Skyline provides thread-safe queue implementations for managing concurrent operations and asynchronous task execution.
+
+## Task Class
+
+The `Task` class encapsulates a unit of work with completion signaling.
+
+### Constructor (Default)
+
+Creates a new task with no function.
+
+```cpp
+Task()
+```
+
+**Implementation:**
+- Initializes a completion event with auto-clear mode
+- Event starts in non-signaled state
+
+---
+
+### Constructor (With Function)
+
+Creates a new task with a function to execute.
+
+```cpp
+Task(std::function<void()> taskFunc)
+```
+
+<ParamField path="taskFunc" type="std::function<void()>" required>
+  Function to execute when the task runs
+</ParamField>
+
+**Example:**
+```cpp
+auto task = new skyline::utils::Task([]() {
+    // Task code here
+    skyline::logger::s_Instance->Log("Task running\n");
+});
+```
+
+---
+
+### Public Members
+
+<ParamField path="taskFunc" type="std::function<void()>">
+  The function to execute for this task
+</ParamField>
+
+<ParamField path="completionEvent" type="nn::os::EventType">
+  Event that is signaled when the task completes execution
+</ParamField>
+
+---
+
+### Destructor
+
+```cpp
+~Task()
+```
+
+**Implementation:**
+- Finalizes the completion event
+- Cleans up event resources
+
+<Warning>
+  Do not destroy a Task while it is being executed by a SafeTaskQueue.
+</Warning>
+
+---
+
+## SafeQueue Template
+
+A thread-safe generic queue built on Nintendo's message queue primitives.
+
+### Template Declaration
+
+```cpp
+template <typename T>
+class SafeQueue
+```
+
+<ParamField path="T" type="typename" required>
+  Type of elements stored in the queue (must be pointer-sized)
+</ParamField>
+
+---
+
+### Constructor
+
+Creates a new SafeQueue with a fixed capacity.
+
+```cpp
+SafeQueue(u64 count)
+```
+
+<ParamField path="count" type="u64" required>
+  Maximum number of elements the queue can hold
+</ParamField>
+
+**Implementation:**
+- Allocates a buffer for queue storage
+- Initializes Nintendo's message queue with the buffer
+- Queue capacity is fixed at creation time
+
+**Example:**
+```cpp
+// Create a queue that can hold 100 items
+auto queue = new skyline::utils::SafeQueue<MyData>(100);
+```
+
+---
+
+### push (Blocking)
+
+Adds an element to the queue, blocking if full.
+
+```cpp
+void push(std::unique_ptr<T>* ptr)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>*" required>
+  Pointer to unique_ptr to push onto the queue
+</ParamField>
+
+**Behavior:**
+- Blocks indefinitely if the queue is full
+- Thread-safe, can be called from multiple threads
+
+**Example:**
+```cpp
+auto item = std::make_unique<MyData>();
+queue->push(&item);
+```
+
+---
+
+### push (Timed)
+
+Adds an element to the queue with a timeout.
+
+```cpp
+bool push(std::unique_ptr<T>* ptr, nn::TimeSpan span)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>*" required>
+  Pointer to unique_ptr to push onto the queue
+</ParamField>
+
+<ParamField path="span" type="nn::TimeSpan" required>
+  Maximum time to wait for space in the queue
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns true if the item was pushed, false if timeout occurred
+</ResponseField>
+
+**Example:**
+```cpp
+auto item = std::make_unique<MyData>();
+if (queue->push(&item, nn::TimeSpan::FromSeconds(5))) {
+    // Successfully pushed within 5 seconds
+} else {
+    // Timeout - queue was full
+}
+```
+
+---
+
+### pop (Blocking)
+
+Removes an element from the queue, blocking if empty.
+
+```cpp
+void pop(std::unique_ptr<T>** ptr)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>**" required>
+  Pointer to receive the popped unique_ptr
+</ParamField>
+
+**Behavior:**
+- Blocks indefinitely if the queue is empty
+- Thread-safe, can be called from multiple threads
+
+**Example:**
+```cpp
+std::unique_ptr<MyData>* item;
+queue->pop(&item);
+// Use item->get() to access the data
+```
+
+---
+
+### pop (Timed)
+
+Removes an element from the queue with a timeout.
+
+```cpp
+bool pop(std::unique_ptr<T>** ptr, nn::TimeSpan span)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>**" required>
+  Pointer to receive the popped unique_ptr
+</ParamField>
+
+<ParamField path="span" type="nn::TimeSpan" required>
+  Maximum time to wait for an item
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns true if an item was popped, false if timeout occurred
+</ResponseField>
+
+**Example:**
+```cpp
+std::unique_ptr<MyData>* item;
+if (queue->pop(&item, nn::TimeSpan::FromMilliSeconds(100))) {
+    // Got an item
+} else {
+    // Timeout - queue was empty
+}
+```
+
+---
+
+### tryPush
+
+Attempts to add an element without blocking.
+
+```cpp
+bool tryPush(std::unique_ptr<T>* ptr)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>*" required>
+  Pointer to unique_ptr to push onto the queue
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns true if the item was pushed, false if queue was full
+</ResponseField>
+
+**Example:**
+```cpp
+auto item = std::make_unique<MyData>();
+if (!queue->tryPush(&item)) {
+    // Queue is full, handle overflow
+}
+```
+
+---
+
+### tryPop
+
+Attempts to remove an element without blocking.
+
+```cpp
+bool tryPop(std::unique_ptr<T>** ptr)
+```
+
+<ParamField path="ptr" type="std::unique_ptr<T>**" required>
+  Pointer to receive the popped unique_ptr
+</ParamField>
+
+<ResponseField name="return" type="bool">
+  Returns true if an item was popped, false if queue was empty
+</ResponseField>
+
+**Example:**
+```cpp
+std::unique_ptr<MyData>* item;
+if (queue->tryPop(&item)) {
+    // Process item
+}
+```
+
+---
+
+### Destructor
+
+```cpp
+~SafeQueue()
+```
+
+**Implementation:**
+- Finalizes the message queue
+- Frees the internal buffer
+
+<Warning>
+  Ensure all threads have stopped using the queue before destroying it.
+</Warning>
+
+---
+
+## SafeTaskQueue Class
+
+A specialized queue for executing tasks on a dedicated worker thread.
+
+### Class Definition
+
+```cpp
+class SafeTaskQueue : public SafeQueue<Task>
+```
+
+Inherits from `SafeQueue<Task>`, adding thread management for automatic task execution.
+
+---
+
+### Constructor
+
+Creates a new task queue with specified capacity.
+
+```cpp
+SafeTaskQueue(u64 count)
+```
+
+<ParamField path="count" type="u64" required>
+  Maximum number of tasks the queue can hold
+</ParamField>
+
+**Example:**
+```cpp
+// Create a task queue that can hold 100 tasks
+auto taskQueue = new skyline::utils::SafeTaskQueue(100);
+```
+
+---
+
+### startThread
+
+Starts the worker thread that processes tasks.
+
+```cpp
+void startThread(s32 priority, s32 core, u64 stackSize)
+```
+
+<ParamField path="priority" type="s32" required>
+  Thread priority (lower numbers = higher priority)
+</ParamField>
+
+<ParamField path="core" type="s32" required>
+  CPU core to run the thread on (0-3, or -2 for any core)
+</ParamField>
+
+<ParamField path="stackSize" type="u64" required>
+  Size of the thread's stack in bytes
+</ParamField>
+
+**Implementation:**
+- Allocates an aligned stack with `memalign(0x1000, stackSize)`
+- Creates a thread using `nn::os::CreateThread`
+- Starts the thread immediately
+- Logs success/failure to the logger
+
+**Example:**
+```cpp
+taskQueue->startThread(
+    20,        // Priority 20
+    3,         // Run on core 3
+    0x10000    // 64 KB stack
+);
+```
+
+<Info>
+  Thread priorities on Nintendo Switch range from 0 (highest) to 31 (lowest). System threads typically use 16-31.
+</Info>
+
+---
+
+### Public Members
+
+<ParamField path="thread" type="nn::os::ThreadType">
+  The worker thread that processes tasks from the queue
+</ParamField>
+
+---
+
+### _threadEntrypoint (Internal)
+
+The worker thread's main loop (internal implementation).
+
+```cpp
+void _threadEntrypoint()
+```
+
+**Implementation:**
+1. Logs that the thread has started
+2. Enters an infinite loop:
+   - Waits for a task with 10ms timeout using `pop(&taskptr, nn::TimeSpan::FromNanoSeconds(10000000))`
+   - If a task is received:
+     - Executes the task's function
+     - Signals the task's completion event
+     - Releases and deletes the task
+   - Otherwise, continues waiting
+
+<Warning>
+  This is an internal method. Do not call directly.
+</Warning>
+
+---
+
+## Usage Examples
+
+### Basic Task Execution
+
+```cpp
+// Create and start a task queue
+auto taskQueue = new skyline::utils::SafeTaskQueue(100);
+taskQueue->startThread(20, 3, 0x10000);
+
+// Create a task
+auto task = new skyline::utils::Task([]() {
+    skyline::logger::s_Instance->Log("Hello from task!\n");
+});
+
+// Push the task (wrap in unique_ptr)
+auto taskPtr = new std::unique_ptr<skyline::utils::Task>(task);
+taskQueue->push(taskPtr);
+
+// Wait for completion
+nn::os::WaitEvent(&task->completionEvent);
+```
+
+---
+
+### Real-World Example from Skyline
+
+From `main.cpp`, showing plugin loading on a background thread:
+
+```cpp
+// Create a task for post-romfs initialization
+static skyline::utils::Task* after_romfs_task = new skyline::utils::Task{[]() {
+    // Initialize socket pool
+    const size_t poolSize = 0x600000;
+    void* socketPool = memalign(0x4000, poolSize);
+    nn::socket::Initialize(socketPool, poolSize, 0x20000, 14);
+
+    // Start logger thread
+    skyline::logger::s_Instance->StartThread();
+
+    // Load plugins
+    auto manager = new skyline::plugin::Manager();
+    manager->LoadPluginsImpl();
+}};
+
+// Later, when romfs is mounted:
+Result handleNnFsMountRom(char const* path, void* buffer, unsigned long size) {
+    Result rc = nnFsMountRomImpl(path, buffer, size);
+    
+    g_MountRomInit.call_once([]() {
+        // Create and start task queue
+        skyline::utils::SafeTaskQueue* taskQueue = 
+            new skyline::utils::SafeTaskQueue(100);
+        taskQueue->startThread(20, 3, 0x10000);
+        
+        // Queue the initialization task
+        taskQueue->push(new std::unique_ptr<skyline::utils::Task>(after_romfs_task));
+        
+        // Wait for it to complete
+        nn::os::WaitEvent(&after_romfs_task->completionEvent);
+    });
+    
+    return rc;
+}
+```
+
+---
+
+### Multiple Tasks
+
+```cpp
+auto taskQueue = new skyline::utils::SafeTaskQueue(10);
+taskQueue->startThread(20, 3, 0x10000);
+
+// Queue multiple tasks
+for (int i = 0; i < 5; i++) {
+    auto task = new skyline::utils::Task([i]() {
+        skyline::logger::s_Instance->LogFormat("Task %d executing\n", i);
+    });
+    taskQueue->push(new std::unique_ptr<skyline::utils::Task>(task));
+}
+```
+
+---
+
+### Task with Completion Waiting
+
+```cpp
+// Create a long-running task
+auto task = new skyline::utils::Task([]() {
+    // Simulate work
+    nn::os::SleepThread(nn::TimeSpan::FromSeconds(2));
+    skyline::logger::s_Instance->Log("Work complete!\n");
+});
+
+// Queue the task
+auto taskPtr = new std::unique_ptr<skyline::utils::Task>(task);
+taskQueue->push(taskPtr);
+
+// Do other work...
+
+// Wait for task to complete before proceeding
+nn::os::WaitEvent(&task->completionEvent);
+skyline::logger::s_Instance->Log("Task finished, continuing...\n");
+```
+
+---
+
+## Thread Safety Notes
+
+<Note>
+  **Thread Safety Guarantees:**
+  
+  - All queue operations (`push`, `pop`, `tryPush`, `tryPop`) are thread-safe
+  - Multiple threads can safely push and pop simultaneously
+  - Built on Nintendo's `nn::os::MessageQueueType` primitives
+  - Uses proper synchronization internally
+</Note>
+
+<Warning>
+  **Important Considerations:**
+  
+  - Queue capacity is fixed at creation - cannot grow dynamically
+  - Blocking operations (`push`, `pop`) will wait indefinitely if queue is full/empty
+  - Always use timed variants (`push` with timeout, `pop` with timeout) if you need responsiveness
+  - Don't destroy a Task until its completion event has been signaled
+  - The worker thread runs forever - plan your shutdown sequence accordingly
+</Warning>
+
+---
+
+## Best Practices
+
+1. **Queue Sizing**: Choose a queue size based on expected task load:
+   ```cpp
+   // For occasional tasks
+   new SafeTaskQueue(10);
+   
+   // For high-frequency tasks
+   new SafeTaskQueue(100);
+   ```
+
+2. **Thread Priority**: Use appropriate priority for your workload:
+   ```cpp
+   // High priority (use sparingly)
+   taskQueue->startThread(16, 3, 0x10000);
+   
+   // Normal background work
+   taskQueue->startThread(20, 3, 0x10000);
+   
+   // Low priority
+   taskQueue->startThread(24, 3, 0x10000);
+   ```
+
+3. **Stack Size**: Allocate enough stack for your tasks:
+   ```cpp
+   // Small tasks
+   taskQueue->startThread(20, 3, 0x4000);   // 16 KB
+   
+   // Normal tasks (recommended)
+   taskQueue->startThread(20, 3, 0x10000);  // 64 KB
+   
+   // Heavy tasks with deep call stacks
+   taskQueue->startThread(20, 3, 0x20000);  // 128 KB
+   ```
+
+4. **Error Handling**: Always check for queue full conditions:
+   ```cpp
+   auto task = new std::unique_ptr<skyline::utils::Task>(
+       new skyline::utils::Task([]() { /* work */ })
+   );
+   
+   if (!taskQueue->tryPush(task)) {
+       skyline::logger::s_Instance->Log("Queue full!\n");
+       // Handle overflow
+   }
+   ```

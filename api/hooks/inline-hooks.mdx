@@ -1,0 +1,463 @@
+---
+title: "Inline Hooks"
+description: "Hook arbitrary code locations with full register context access"
+icon: "code"
+---
+
+Inline hooks allow you to intercept execution at any point in the code, not just at function boundaries. Your callback receives a complete snapshot of all CPU registers, enabling inspection and modification of the execution state.
+
+## A64InlineHook
+
+Installs a hook at an arbitrary code address with full register context.
+
+### Signature
+
+```cpp
+extern "C" void A64InlineHook(
+    void* const symbol,
+    void* const replace
+);
+```
+
+### Parameters
+
+<ParamField path="symbol" type="void*" required>
+  Pointer to the code address where the hook should be installed. This can be:
+  - Any valid instruction address in executable memory
+  - The middle of a function
+  - The start of a basic block
+  - After a function prologue
+  
+  <Warning>
+    The address must be 4-byte aligned (aligned to ARM instruction boundaries).
+  </Warning>
+</ParamField>
+
+<ParamField path="replace" type="void*" required>
+  Pointer to your callback function. The callback must have this signature:
+  
+  ```cpp
+  void MyInlineCallback(InlineCtx* ctx);
+  ```
+  
+  The callback receives a pointer to an `InlineCtx` structure containing all CPU registers at the time of the hook.
+</ParamField>
+
+### Return Value
+
+This function returns `void`. If the hook installation fails, it will trigger a fatal error:
+- `SkylineError_InlineHookHandlerSizeInvalid` - Handler size mismatch
+- `SkylineError_InlineHookPoolExhausted` - No more inline hooks available
+
+<Warning>
+  Inline hook failures are fatal. Always ensure you have sufficient hooks available (max 4096 inline hooks).
+</Warning>
+
+## InlineCtx Structure
+
+Provides complete CPU register state at the hook point.
+
+### Definition
+
+```cpp
+struct InlineCtx {
+    nn::os::CpuRegister registers[31];    // X0-X30 general-purpose registers
+    nn::os::CpuRegister sp;               // Stack pointer
+    nn::os::FpuRegister registers_f[32];  // Q0-Q31 floating-point/SIMD registers
+};
+```
+
+### Fields
+
+<ResponseField name="registers" type="nn::os::CpuRegister[31]">
+  Array of general-purpose registers X0-X30.
+  
+  - `registers[0]` = X0 (first argument / return value)
+  - `registers[1]` = X1 (second argument)
+  - `registers[29]` = X29 (frame pointer)
+  - `registers[30]` = X30 (link register)
+</ResponseField>
+
+<ResponseField name="sp" type="nn::os::CpuRegister">
+  Stack pointer (SP) at the time of the hook.
+</ResponseField>
+
+<ResponseField name="registers_f" type="nn::os::FpuRegister[32]">
+  Array of 128-bit SIMD/floating-point registers Q0-Q31.
+  
+  These are used for:
+  - Floating-point operations
+  - SIMD/vector operations
+  - First 8 also used for floating-point arguments (Q0-Q7)
+</ResponseField>
+
+### Register Layout
+
+The `InlineCtx` structure has a total size of 0x300 bytes:
+
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 - 0xF0 | 248 bytes | X0-X30 general registers |
+| 0xF0 - 0x100 | 16 bytes | SP (stack pointer) |
+| 0x100 - 0x300 | 512 bytes | Q0-Q31 SIMD registers |
+
+## Initialization
+
+### A64HookInit
+
+Initializes the inline hook system. Must be called before using any hook functions.
+
+```cpp
+void A64HookInit();
+```
+
+<Info>
+  Call this function once during your plugin's initialization, before installing any hooks.
+</Info>
+
+#### What It Does
+
+1. Initializes a mutex for thread-safe hook operations
+2. Allocates JIT memory for function hook trampolines (2048 slots)
+3. Allocates JIT memory for inline hook handlers (4096 slots)
+4. Finds suitable memory regions near the main executable
+
+#### Example
+
+```cpp
+void skyline_main() {
+    // Initialize hooking system
+    A64HookInit();
+    
+    // Now you can install hooks
+    A64HookFunction(/* ... */);
+    A64InlineHook(/* ... */);
+}
+```
+
+## Usage Examples
+
+### Basic Inline Hook
+
+Hook a specific code location and log register values:
+
+```cpp
+void MyInlineCallback(InlineCtx* ctx) {
+    // Access general-purpose registers
+    u64 x0 = ctx->registers[0].x;
+    u64 x1 = ctx->registers[1].x;
+    
+    skyline::logger::s_Instance->LogFormat(
+        "Hook triggered! X0=0x%llx, X1=0x%llx\n",
+        x0, x1
+    );
+}
+
+void InstallHook() {
+    // Hook at a specific address
+    void* hookAddress = reinterpret_cast<void*>(0x71000ABCD0);
+    A64InlineHook(hookAddress, reinterpret_cast<void*>(MyInlineCallback));
+}
+```
+
+### Modifying Registers
+
+Change register values to alter execution flow:
+
+```cpp
+void ForceReturnValue(InlineCtx* ctx) {
+    // Override return value (X0)
+    ctx->registers[0].x = 1;  // Force success
+    
+    skyline::logger::s_Instance->Log("Forced return value to 1\n");
+}
+
+void InstallHook() {
+    // Hook right before a function returns
+    void* beforeReturn = reinterpret_cast<void*>(0x71000ABCD0);
+    A64InlineHook(beforeReturn, reinterpret_cast<void*>(ForceReturnValue));
+}
+```
+
+### Inspecting Function Arguments
+
+Hook at the start of a function to see its arguments:
+
+```cpp
+void LogFunctionArgs(InlineCtx* ctx) {
+    // AArch64 calling convention:
+    // X0-X7 = first 8 arguments
+    void* arg1 = reinterpret_cast<void*>(ctx->registers[0].x);
+    u64 arg2 = ctx->registers[1].x;
+    u64 arg3 = ctx->registers[2].x;
+    
+    skyline::logger::s_Instance->LogFormat(
+        "Function called: arg1=%p, arg2=0x%llx, arg3=0x%llx\n",
+        arg1, arg2, arg3
+    );
+}
+
+void InstallHook() {
+    // Hook after the function prologue
+    void* afterPrologue = reinterpret_cast<void*>(0x71000ABCD8);
+    A64InlineHook(afterPrologue, reinterpret_cast<void*>(LogFunctionArgs));
+}
+```
+
+### Accessing Floating-Point Registers
+
+Inspect SIMD/floating-point state:
+
+```cpp
+void LogFloatArgs(InlineCtx* ctx) {
+    // Q0-Q7 used for floating-point arguments
+    // Access as different types:
+    float f32_value = ctx->registers_f[0].v[0];  // First float in Q0
+    double f64_value = ctx->registers_f[0].d[0]; // First double in Q0
+    
+    skyline::logger::s_Instance->LogFormat(
+        "Float args: Q0.s[0]=%f, Q0.d[0]=%f\n",
+        f32_value, f64_value
+    );
+}
+```
+
+### Conditional Hook Behavior
+
+Execute logic based on register state:
+
+```cpp
+void ConditionalHook(InlineCtx* ctx) {
+    u64 flags = ctx->registers[0].x;
+    
+    if (flags & 0x1) {
+        skyline::logger::s_Instance->Log("Flag bit 0 is set\n");
+    }
+    
+    if (ctx->registers[1].x == 0) {
+        skyline::logger::s_Instance->Log("Warning: X1 is NULL\n");
+        // Optionally modify behavior
+        ctx->registers[0].x = 0;  // Set error flag
+    }
+}
+```
+
+### Stack Inspection
+
+Access the stack through the stack pointer:
+
+```cpp
+void InspectStack(InlineCtx* ctx) {
+    u64* stack = reinterpret_cast<u64*>(ctx->sp.x);
+    
+    // Read values from stack
+    u64 stack_value1 = stack[0];
+    u64 stack_value2 = stack[1];
+    
+    skyline::logger::s_Instance->LogFormat(
+        "Stack: SP=%p, [SP]=%llx, [SP+8]=%llx\n",
+        stack, stack_value1, stack_value2
+    );
+}
+```
+
+## When to Use Inline Hooks
+
+Inline hooks are ideal for:
+
+✅ **Mid-function inspection** - Hook in the middle of a function to inspect intermediate state
+
+✅ **Conditional breakpoints** - Execute code only when certain conditions are met
+
+✅ **Register manipulation** - Modify register values to change execution flow
+
+✅ **Precise timing** - Hook at exact instruction addresses for timing-sensitive operations
+
+✅ **Analyzing proprietary code** - Reverse engineer unknown functions by observing register state
+
+**Use function hooks instead when:**
+- You want to replace an entire function
+- You need to call the original function
+- You only care about function entry/exit points
+
+## Performance Considerations
+
+### Hook Overhead
+
+Each inline hook adds overhead:
+
+1. **Register backup** - ~50 instructions to save all registers (0x300 bytes stack)
+2. **Callback execution** - Your callback function
+3. **Register restore** - ~50 instructions to restore all registers
+4. **Trampoline branch** - Jump to original code
+
+<Warning>
+  Inline hooks are more expensive than function hooks due to the full register save/restore.
+  
+  Avoid hooking code in tight loops or performance-critical paths.
+</Warning>
+
+### Pool Limits
+
+- **Maximum inline hooks**: 4096 (`inline_hook_count`)
+- **Handler size**: 12 bytes per hook
+- **Total pool size**: ~192 KB
+
+If you exceed this limit, `A64InlineHook` will trigger a fatal error.
+
+## Technical Details
+
+### Hook Installation Process
+
+1. **Allocate handler entry** - Get next available slot in inline hook pool
+2. **Create trampoline** - Use `A64HookFunction` to redirect execution
+3. **Setup handler** - Copy inline handler assembly into JIT memory
+4. **Link callback** - Store callback pointer in handler entry
+5. **Make executable** - Transition JIT memory to executable mode
+
+From `And64InlineHook.cpp:677`:
+
+```cpp
+extern "C" void A64InlineHook(void* const address, void* const callback) {
+    // Validate handler size
+    if (inline_hook_handler_size != handler_end_addr - handler_start_addr) {
+        R_ERRORONFAIL(MAKERESULT(Module_Skyline, 
+            SkylineError_InlineHookHandlerSizeInvalid));
+    }
+    
+    // Check pool availability
+    if (inline_hook_curridx >= inline_hook_count) {
+        R_ERRORONFAIL(MAKERESULT(Module_Skyline, 
+            SkylineError_InlineHookPoolExhausted));
+    }
+    
+    // Hook to call the handler
+    void* trampoline;
+    A64HookFunction(address, &rx.handler, &trampoline);
+    
+    // Populate handler entry
+    memcpy(rw.handler.data(), (void*)handler_start_addr, 
+        inline_hook_handler_size);
+    rw.cur_handler = &inlineHandlerImpl;
+    rw.callback = callback;
+    rw.trampoline = trampoline;
+    
+    inline_hook_curridx++;
+}
+```
+
+### Handler Assembly
+
+The inline hook handler is implemented in ARM assembly (`armutils.s:94`):
+
+```asm
+inlineHandlerImpl:
+    armBackupRegisters      ; Save all CPU state (0x300 bytes)
+    
+    mov x0, sp              ; Pass InlineCtx* as argument
+    ldr x16, [x17, #8]      ; Load callback address
+    blr x16                 ; Call user callback
+    
+    armRecoverRegisters     ; Restore all CPU state
+    
+    ldr x16, [x17, #0x10]   ; Load trampoline address
+    br x16                  ; Jump to original code
+```
+
+### Memory Layout
+
+Each inline hook entry has this structure:
+
+```cpp
+struct inline_hook_entry {
+    uint8_t handler[12];        // Offset 0x00: Handler assembly
+    const void* cur_handler;    // Offset 0x0C: Handler implementation
+    const void* callback;       // Offset 0x14: User callback
+    const void* trampoline;     // Offset 0x1C: Original code
+};
+```
+
+The inline hook pool is allocated near the main executable (within ±128MB) to enable efficient branching.
+
+## Best Practices
+
+### Keep Callbacks Fast
+
+<Warning>
+  Your callback is executed with all registers saved. Minimize work to reduce overhead:
+  
+  ```cpp
+  // ✅ Good: Fast logging
+  void FastCallback(InlineCtx* ctx) {
+      if (g_debug_enabled) {
+          log_buffer[log_index++] = ctx->registers[0].x;
+      }
+  }
+  
+  // ❌ Bad: Expensive work in callback
+  void SlowCallback(InlineCtx* ctx) {
+      std::string msg = format_message(ctx);  // Allocation
+      send_over_network(msg);                 // I/O
+  }
+  ```
+</Warning>
+
+### Don't Modify Stack Pointer
+
+The stack pointer should not be modified:
+
+```cpp
+void BadCallback(InlineCtx* ctx) {
+    ctx->sp.x += 0x100;  // ❌ DON'T DO THIS - will corrupt stack
+}
+```
+
+### Be Careful with Register Modifications
+
+Modifying registers can break assumptions in the original code:
+
+```cpp
+void SafeCallback(InlineCtx* ctx) {
+    // ✅ Safe: Modify return value before function returns
+    if (ctx->registers[30].x == return_address) {
+        ctx->registers[0].x = 0;  // OK to modify
+    }
+    
+    // ⚠️ Dangerous: Modifying mid-function may break invariants
+    ctx->registers[5].x = 0;  // May break if code relies on X5
+}
+```
+
+### Verify Hook Addresses
+
+Ensure hook addresses are valid and aligned:
+
+```cpp
+void InstallSafeHook(uintptr_t address) {
+    // Check alignment
+    if (address % 4 != 0) {
+        skyline::logger::s_Instance->Log("ERROR: Unaligned address\n");
+        return;
+    }
+    
+    // Verify address is in executable region
+    if (!is_executable_address(address)) {
+        skyline::logger::s_Instance->Log("ERROR: Not executable\n");
+        return;
+    }
+    
+    A64InlineHook(reinterpret_cast<void*>(address), MyCallback);
+}
+```
+
+## Related APIs
+
+- [Function Hooks](/api/hooks/function-hooks) - For hooking entire functions
+- [Initialization](/api/core/initialization) - Setting up the hook system
+
+## See Also
+
+- `A64HookFunction()` - Function hooking API
+- `A64HookInit()` - Initialize hooking system
+- Source: `/source/skyline/inlinehook/And64InlineHook.cpp:677`
+- Assembly: `/source/skyline/utils/armutils.s:94`

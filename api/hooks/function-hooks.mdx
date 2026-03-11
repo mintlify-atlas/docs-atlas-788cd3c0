@@ -1,0 +1,320 @@
+---
+title: "Function Hooks"
+description: "Hook and replace entire functions with A64HookFunction"
+icon: "function"
+---
+
+Function hooks allow you to intercept and replace entire functions in the game's code. When you hook a function, the original function is redirected to your replacement, and you optionally receive a trampoline to call the original implementation.
+
+## A64HookFunction
+
+Replaces a function at runtime by redirecting execution to your replacement function.
+
+### Signature
+
+```cpp
+extern "C" void A64HookFunction(
+    void* const symbol,
+    void* const replace,
+    void** result
+);
+```
+
+### Parameters
+
+<ParamField path="symbol" type="void*" required>
+  Pointer to the function to hook. This can be:
+  - A direct function pointer (e.g., `reinterpret_cast<void*>(MyFunction)`)
+  - An address obtained via `nn::ro::LookupSymbol`
+  - Any valid executable memory address
+</ParamField>
+
+<ParamField path="replace" type="void*" required>
+  Pointer to your replacement function. This function will be called instead of the original.
+  
+  The replacement function should have the same signature as the original function to maintain ABI compatibility.
+</ParamField>
+
+<ParamField path="result" type="void**">
+  Output parameter that receives a pointer to the trampoline function. Pass `NULL` if you don't need to call the original function.
+  
+  The trampoline contains the original instructions and allows you to call the original function from within your hook.
+</ParamField>
+
+### Return Value
+
+This function returns `void`. The trampoline pointer is written to the `result` parameter.
+
+<Warning>
+  If hooking fails and `result` is not `NULL`, the value at `result` will be set to `NULL`.
+</Warning>
+
+### How It Works
+
+1. **Initialization Required**: You must call `A64HookInit()` before using any hook functions (typically in your entry point).
+
+2. **Trampoline Creation**: If `result` is non-NULL, the function creates a trampoline containing:
+   - The original instructions that were overwritten
+   - Fixed-up PC-relative instructions
+   - A jump back to continue the original function
+
+3. **Instruction Patching**: The original function is patched with either:
+   - A single branch instruction (if within ±128MB range)
+   - A 5-instruction sequence for absolute jumps (if beyond branch range)
+
+4. **Thread Safety**: The function uses a mutex internally to ensure thread-safe hooking operations.
+
+### Usage Examples
+
+#### Basic Hook Without Trampoline
+
+If you want to completely replace a function without calling the original:
+
+```cpp
+void MyCustomFunction() {
+    // Your implementation
+}
+
+// Hook the function
+A64HookFunction(
+    reinterpret_cast<void*>(OriginalFunction),
+    reinterpret_cast<void*>(MyCustomFunction),
+    nullptr  // No trampoline needed
+);
+```
+
+#### Hook With Trampoline
+
+When you need to call the original function:
+
+```cpp
+Result (*originalMountRom)(char const*, void*, unsigned long) = nullptr;
+
+Result MyMountRomHook(char const* path, void* buffer, unsigned long size) {
+    // Pre-processing
+    skyline::logger::s_Instance->LogFormat("Mounting ROM: %s\n", path);
+    
+    // Call original function
+    Result rc = originalMountRom(path, buffer, size);
+    
+    // Post-processing
+    if (R_SUCCEEDED(rc)) {
+        skyline::logger::s_Instance->Log("Mount successful\n");
+    }
+    
+    return rc;
+}
+
+// Install the hook
+A64HookFunction(
+    reinterpret_cast<void*>(nn::fs::MountRom),
+    reinterpret_cast<void*>(MyMountRomHook),
+    reinterpret_cast<void**>(&originalMountRom)
+);
+```
+
+#### Real-World Example from Skyline
+
+From `main.cpp:120`:
+
+```cpp
+Result (*nnFsMountRomImpl)(char const*, void*, unsigned long);
+
+Result handleNnFsMountRom(char const* path, void* buffer, unsigned long size) {
+    Result rc = nnFsMountRomImpl(path, buffer, size);
+    
+    skyline::utils::g_RomMountStr = std::string(path) + ":/";
+    
+    g_MountRomInit.call_once([]() {
+        // Initialize systems after ROM is mounted
+        skyline::utils::SafeTaskQueue* taskQueue = 
+            new skyline::utils::SafeTaskQueue(100);
+        taskQueue->startThread(20, 3, 0x10000);
+        taskQueue->push(new std::unique_ptr<skyline::utils::Task>(after_romfs_task));
+        nn::os::WaitEvent(&after_romfs_task->completionEvent);
+    });
+    
+    return rc;
+}
+
+void skyline_main() {
+    A64HookInit();
+    
+    A64HookFunction(
+        reinterpret_cast<void*>(nn::fs::MountRom),
+        reinterpret_cast<void*>(handleNnFsMountRom),
+        reinterpret_cast<void**>(&nnFsMountRomImpl)
+    );
+}
+```
+
+#### Hooking Functions by Symbol Name
+
+```cpp
+Result (*nnRoInitializeImpl)();
+
+Result MyRoInitHook() {
+    Result ret = nnRoInitializeImpl();
+    skyline::logger::s_Instance->LogFormat(
+        "nn::ro::Initialize returned: 0x%x\n", ret
+    );
+    return ret;
+}
+
+// Hook using function pointer
+A64HookFunction(
+    reinterpret_cast<void*>(nn::ro::Initialize),
+    reinterpret_cast<void*>(MyRoInitHook),
+    reinterpret_cast<void**>(&nnRoInitializeImpl)
+);
+```
+
+## A64HookFunctionV
+
+Low-level variant of `A64HookFunction` with manual memory management.
+
+### Signature
+
+```cpp
+void* A64HookFunctionV(
+    void* const symbol,
+    void* const replace,
+    void* const rxtr,
+    void* const rwtr,
+    const uintptr_t rwx_size
+);
+```
+
+### Parameters
+
+<ParamField path="symbol" type="void*" required>
+  Pointer to the function to hook.
+</ParamField>
+
+<ParamField path="replace" type="void*" required>
+  Pointer to the replacement function.
+</ParamField>
+
+<ParamField path="rxtr" type="void*" required>
+  Executable memory region for the trampoline.
+</ParamField>
+
+<ParamField path="rwtr" type="void*" required>
+  Writable memory region for the trampoline (must map to same physical memory as `rxtr`).
+</ParamField>
+
+<ParamField path="rwx_size" type="uintptr_t" required>
+  Size of the trampoline buffer. Must be at least `A64_MAX_INSTRUCTIONS * 10 * sizeof(uint32_t)` bytes.
+</ParamField>
+
+### Return Value
+
+Returns a pointer to the executable trampoline (`rxtr`) on success, or `NULL` on failure.
+
+<Info>
+  Most users should use `A64HookFunction` instead, which handles memory allocation automatically.
+  
+  Use `A64HookFunctionV` only when you need fine-grained control over trampoline memory placement.
+</Info>
+
+## Best Practices
+
+### Function Signature Matching
+
+Ensure your replacement function has the exact same signature as the original:
+
+```cpp
+// Original function
+Result OriginalFunction(int arg1, void* arg2);
+
+// ✅ Correct: Matching signature
+Result MyHook(int arg1, void* arg2) { /* ... */ }
+
+// ❌ Wrong: Mismatched signature will cause crashes
+void MyHook(void* arg2) { /* ... */ }
+```
+
+### Calling Convention
+
+On AArch64, the calling convention is:
+- Arguments 1-8: `x0-x7` registers
+- Return value: `x0` register
+- Floating-point args: `q0-q7` registers
+
+The hook framework preserves the calling convention automatically.
+
+### Hook Ordering
+
+Hooks are installed immediately and affect all subsequent calls:
+
+```cpp
+// Install hooks during initialization
+void skyline_main() {
+    A64HookInit();
+    
+    // Hook order matters if functions call each other
+    A64HookFunction(functionA, hookA, &trampolineA);
+    A64HookFunction(functionB, hookB, &trampolineB);
+}
+```
+
+### Error Handling
+
+<Warning>
+  Always verify hook installation by checking the trampoline pointer:
+  
+  ```cpp
+  void* trampoline = nullptr;
+  A64HookFunction(symbol, replace, &trampoline);
+  
+  if (trampoline == nullptr) {
+      // Hook failed - handle error
+      skyline::logger::s_Instance->Log("Hook installation failed!\n");
+  }
+  ```
+</Warning>
+
+### Memory Constraints
+
+The hook system has a limited pool of trampolines:
+- Maximum of 2048 function hooks (`A64_MAX_BACKUPS`)
+- Each trampoline can use up to `A64_MAX_INSTRUCTIONS * 10` instructions
+
+If you exhaust the pool, subsequent hooks will fail.
+
+## Technical Details
+
+### Instruction Relocation
+
+The hooking system automatically fixes PC-relative instructions in the trampoline:
+
+- **Branch instructions** (`B`, `BL`, `B.cond`)
+- **Compare and branch** (`CBZ`, `CBNZ`, `TBZ`, `TBNZ`)
+- **Load literal** (`LDR`, `LDRSW`, `LDR` vector)
+- **PC-relative address** (`ADR`, `ADRP`)
+
+### Hook Patching Strategies
+
+**Short-range patch** (±128MB):
+```asm
+B <replace>    ; Single branch instruction (4 bytes)
+```
+
+**Long-range patch** (beyond ±128MB):
+```asm
+NOP            ; Alignment if needed
+LDR X17, #8    ; Load target address
+BR X17         ; Branch to address
+.quad <replace> ; 64-bit target address
+```
+
+## Related APIs
+
+- [Inline Hooks](/api/hooks/inline-hooks) - For mid-function hooking
+- [Initialization](/api/core/initialization) - Setting up the hook system
+
+## See Also
+
+- `A64HookInit()` - Initialize the hooking system
+- `InlineCtx` structure - For inline hooks with register context
+- Source: `/source/skyline/inlinehook/And64InlineHook.cpp:645`

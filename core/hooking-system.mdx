@@ -1,0 +1,482 @@
+---
+title: Hooking System
+description: ARM64 function hooking and inline patching with A64InlineHook
+---
+
+Skyline's hooking system provides two primary methods for intercepting function calls: **function hooks** (`A64HookFunction`) and **inline hooks** (`A64InlineHook`). Both are built on top of the ARM64 instruction rewriting engine from the [And64InlineHook](https://github.com/Rprop/And64InlineHook) library.
+
+## Hook Types Comparison
+
+<CardGroup cols={2}>
+  <Card title="A64HookFunction" icon="exchange">
+    **Function-level hooks** that redirect entire function calls and provide trampolines to call the original.
+    
+    - ✅ Can call original function
+    - ✅ Full parameter access
+    - ✅ Type-safe with proper casting
+    - ❌ Cannot access modified registers
+  </Card>
+  
+  <Card title="A64InlineHook" icon="syringe">
+    **Inline hooks** that execute custom code at any instruction, preserving full CPU state.
+    
+    - ✅ Access all CPU registers
+    - ✅ Hook mid-function
+    - ✅ Examine/modify execution state
+    - ❌ Cannot easily call original code
+  </Card>
+</CardGroup>
+
+## A64HookFunction - Function Hooking
+
+### Function Signature
+
+```cpp include/skyline/inlinehook/And64InlineHook.hpp:58
+extern "C" void A64HookFunction(void* const symbol, void* const replace, void** result);
+```
+
+### Parameters
+
+- **`symbol`**: Pointer to the function you want to hook
+- **`replace`**: Pointer to your replacement function
+- **`result`**: Output pointer to the trampoline (for calling the original function)
+
+### How It Works
+
+When you call `A64HookFunction`, the following happens:
+
+<Steps>
+  <Step title="Lock Hook Mutex">
+    Ensures thread-safe hook installation.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:646
+    nn::os::LockMutex(&hookMutex);
+    ```
+  </Step>
+  
+  <Step title="Allocate Trampoline">
+    If a trampoline is requested, allocates space in the JIT buffer.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:651-652
+    uint32_t *rxtrampoline = NULL, *rwtrampoline = NULL;
+    if (result != NULL) {
+        FastAllocateTrampoline(&rxtrampoline, &rwtrampoline);
+        *result = rxtrampoline;
+    }
+    ```
+    
+    The trampoline contains the original instructions that will be overwritten, followed by a jump back to the function.
+  </Step>
+  
+  <Step title="Calculate Branch Distance">
+    Determines if a direct branch instruction can reach the replacement function.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:579
+    auto pc_offset = static_cast<int64_t>(__intval(replace) - __intval(symbol)) >> 2;
+    if (llabs(pc_offset) >= (mask >> 1)) {
+        // Long form: requires 5 instructions
+    } else {
+        // Short form: single branch instruction
+    }
+    ```
+  </Step>
+  
+  <Step title="Overwrite Original Function">
+    Writes the hook code to the original function location.
+    
+    **Short form (1 instruction):**
+    ```armasm
+    B replace_function  // Direct branch
+    ```
+    
+    **Long form (4-5 instructions):**
+    ```armasm
+    NOP              // Optional alignment
+    LDR X17, #0x8    // Load address into X17
+    BR X17           // Branch to X17
+    .quad replace_addr  // 64-bit address
+    ```
+  </Step>
+  
+  <Step title="Flush Caches">
+    Ensures the CPU sees the new instructions.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:605
+    __flush_cache(symbol, 5 * sizeof(uint32_t));
+    ```
+  </Step>
+</Steps>
+
+### Example: Hooking nn::fs::MountRom
+
+From `source/main.cpp:120-121`:
+
+```cpp
+Result (*nnFsMountRomImpl)(char const*, void*, unsigned long);
+
+// Install the hook
+A64HookFunction(
+    reinterpret_cast<void*>(nn::fs::MountRom),  // Original function
+    reinterpret_cast<void*>(handleNnFsMountRom), // Replacement function
+    (void**)&nnFsMountRomImpl                    // Trampoline output
+);
+
+// Replacement function with same signature
+Result handleNnFsMountRom(char const* path, void* buffer, unsigned long size) {
+    // Call original function via trampoline
+    Result rc = nnFsMountRomImpl(path, buffer, size);
+    
+    // Add custom logic
+    skyline::utils::g_RomMountStr = std::string(path) + ":/";
+    
+    // ... initialization code ...
+    
+    return rc;
+}
+```
+
+<Tip>
+Always match the function signature exactly when creating hooks. The trampoline will have the same signature as the original function.
+</Tip>
+
+### Example: Hooking a Game Function
+
+```cpp
+// Original game function we want to hook
+void (*originalPlayerUpdate)(Player* player, float deltaTime);
+
+// Our replacement function
+void hookedPlayerUpdate(Player* player, float deltaTime) {
+    // Custom logic before
+    skyline::logger::s_Instance->LogFormat("Player update called!\\n");
+    
+    // Call original function
+    originalPlayerUpdate(player, deltaTime);
+    
+    // Custom logic after
+    if (player->health <= 0) {
+        skyline::logger::s_Instance->LogFormat("Player died!\\n");
+    }
+}
+
+// Install the hook (during initialization)
+void installHooks() {
+    A64HookFunction(
+        (void*)0x71001a2c40,  // Address of player update function
+        (void*)hookedPlayerUpdate,
+        (void**)&originalPlayerUpdate
+    );
+}
+```
+
+## A64InlineHook - Inline Hooks
+
+### Function Signature
+
+```cpp include/skyline/inlinehook/And64InlineHook.hpp:61
+extern "C" void A64InlineHook(void* const symbol, void* const replace);
+```
+
+### Parameters
+
+- **`symbol`**: Address of the instruction to hook
+- **`replace`**: Callback function that receives the CPU context
+
+### Inline Context Structure
+
+```cpp include/skyline/inlinehook/And64InlineHook.hpp:51-55
+struct InlineCtx {
+    nn::os::CpuRegister registers[31];  // X0-X30
+    nn::os::CpuRegister sp;             // Stack pointer
+    nn::os::FpuRegister registers_f[32]; // V0-V31 (SIMD/FP registers)
+};
+```
+
+This structure provides complete access to the CPU state at the moment of the hook.
+
+### How It Works
+
+Inline hooks are more complex than function hooks:
+
+<Steps>
+  <Step title="Allocate Handler Entry">
+    Each inline hook gets an entry in a pre-allocated pool near the game's code.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:507-512
+    struct PACKED inline_hook_entry {
+        std::array<uint8_t, inline_hook_handler_size> handler;
+        const void* cur_handler;
+        const void* callback;
+        const void* trampoline;
+    };
+    ```
+    
+    Pool configuration:
+    - Size: 0x1000 entries (4096 hooks maximum)
+    - Location: Near `.text` region for short branches
+  </Step>
+  
+  <Step title="Generate Handler">
+    A small assembly handler saves all registers and calls your callback.
+    
+    The handler:
+    1. Saves all 31 general-purpose registers
+    2. Saves the stack pointer
+    3. Saves all 32 SIMD/FP registers
+    4. Calls your callback with pointer to saved state
+    5. Restores all registers
+    6. Executes the trampoline (original instruction)
+  </Step>
+  
+  <Step title="Install Hook">
+    Uses `A64HookFunction` internally to redirect to the handler.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:700
+    void* trampoline;
+    A64HookFunction(address, &rx.handler, &trampoline);
+    ```
+  </Step>
+  
+  <Step title="Populate Entry">
+    Stores callback and trampoline addresses in the handler entry.
+    
+    ```cpp source/skyline/inlinehook/And64InlineHook.cpp:707-710
+    memcpy(rw.handler.data(), (void*)handler_start_addr, inline_hook_handler_size);
+    rw.cur_handler = &inlineHandlerImpl;
+    rw.callback = callback;
+    rw.trampoline = trampoline;
+    ```
+  </Step>
+</Steps>
+
+### Example: Monitoring Register Values
+
+```cpp
+// Callback function - receives CPU context
+void monitorRegisters(InlineCtx* ctx) {
+    // Access any register
+    u64 x0_value = ctx->registers[0].x;
+    u64 x1_value = ctx->registers[1].x;
+    
+    skyline::logger::s_Instance->LogFormat(
+        "Hook called! X0=%llx, X1=%llx\\n", 
+        x0_value, x1_value
+    );
+    
+    // Can also modify registers
+    if (x0_value == 0x12345) {
+        ctx->registers[0].x = 0x99999;  // Change X0 value
+    }
+}
+
+// Install the inline hook
+void installInlineHook() {
+    A64InlineHook(
+        (void*)0x71001a2c40,  // Address of instruction to hook
+        (void*)monitorRegisters
+    );
+}
+```
+
+### Example: Conditional Execution
+
+```cpp
+void conditionalPatch(InlineCtx* ctx) {
+    // Check if we're in a specific game state
+    u64 gameMode = ctx->registers[5].x;
+    
+    if (gameMode == 3) {
+        // In multiplayer mode - skip damage calculation
+        ctx->registers[0].x = 0;  // Set damage to zero
+    }
+}
+
+// Hook the damage calculation function
+A64InlineHook(
+    (void*)getDamageCalculationAddress(),
+    (void*)conditionalPatch
+);
+```
+
+<Warning>
+Inline hooks have significant performance overhead because they save and restore all CPU registers. Use them sparingly and only when you need full register access.
+</Warning>
+
+## Instruction Relocation
+
+Both hook types use sophisticated instruction relocation to handle PC-relative instructions:
+
+### Supported Relocations
+
+1. **Branch Instructions** (`B`, `BL`)
+   - Recalculates offsets for the new location
+   - Converts to absolute jumps if out of range
+
+2. **Conditional Branches** (`B.cond`, `CBZ`, `CBNZ`, `TBZ`, `TBNZ`)
+   - Adjusts PC-relative offsets
+   - Expands to multi-instruction sequences if needed
+
+3. **Load Literal** (`LDR`, `LDRSW`)
+   - Relocates PC-relative loads
+   - Embeds literal values in trampoline if necessary
+
+4. **PC-Relative Addressing** (`ADR`, `ADRP`)
+   - Recalculates addresses relative to new location
+   - Converts to absolute loads for large offsets
+
+### Example Relocation
+
+Original code:
+```armasm
+0x71001a2c40:  B.EQ  0x71001a2c60  // PC-relative branch
+0x71001a2c44:  LDR   X0, [PC, #24] // PC-relative load
+```
+
+In trampoline:
+```armasm
+0x72005000:  B.EQ  0x71001a2c60  // Offset recalculated
+0x72005004:  LDR   X0, #12       // Load from embedded literal
+0x72005008:  B     0x71001a2c48  // Return to original code
+0x72005010:  .quad <original_literal>  // Embedded value
+```
+
+## Memory Management
+
+Hooks use the **ControlledPages** system to safely write to executable memory:
+
+```cpp source/skyline/inlinehook/And64InlineHook.cpp:581-582
+skyline::inlinehook::ControlledPages control(original, 5 * sizeof(uint32_t));
+control.claim();
+```
+
+See [Memory Management](/core/memory-management#controlled-pages-system) for details on how this works.
+
+## JIT Memory Allocation
+
+During initialization, two JIT regions are created:
+
+### Normal Hook JIT
+
+```cpp source/skyline/inlinehook/And64InlineHook.cpp:530-534
+Result rc = jitCreate(&__insns_jit, NULL, sizeof(insns_t));
+memset(__insns_jit.rw_addr, 0, __insns_jit.size);
+rc = jitTransitionToExecutable(&__insns_jit);
+```
+
+- Stores trampolines for `A64HookFunction` calls
+- Capacity: 2048 trampolines
+- Each trampoline: up to 50 instructions
+
+### Inline Hook JIT
+
+```cpp source/skyline/inlinehook/And64InlineHook.cpp:536-553
+// Search for space near .text region
+auto cur_searching_addr = skyline::utils::g_MainTextAddr - inline_hook_pool_size;
+
+MemoryInfo mem;
+while (true) {
+    u32 page_info;
+    if (R_SUCCEEDED(svcQueryMemory(&mem, &page_info, cur_searching_addr)) && 
+        mem.type == MemType_Unmapped && 
+        mem.size >= ALIGN_UP(inline_hook_pool_size, PAGE_SIZE)) {
+        break;
+    }
+    cur_searching_addr -= PAGE_SIZE;
+}
+
+// Allocate near .text for short branches
+rc = jitCreate(&__inline_hook_jit, 
+              (void*)ALIGN_DOWN(mem.addr + mem.size - inline_hook_pool_size, PAGE_SIZE),
+              inline_hook_pool_size);
+```
+
+- Stores handlers for `A64InlineHook` calls
+- Capacity: 4096 hooks
+- Located near game code for efficient branching
+
+<Info>
+The inline hook JIT is placed near the game's `.text` section to ensure branch instructions can reach it without needing long-form jumps.
+</Info>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="When to use A64HookFunction">
+    Use function hooks when:
+    - You want to wrap an entire function
+    - You need to call the original function
+    - You're working with known function signatures
+    - Performance is important
+    
+    **Example use cases:**
+    - Logging function calls
+    - Modifying return values
+    - Implementing feature toggles
+    - Adding validation logic
+  </Accordion>
+  
+  <Accordion title="When to use A64InlineHook">
+    Use inline hooks when:
+    - You need to hook mid-function
+    - You need access to CPU registers
+    - You're patching specific instructions
+    - The function signature is unknown
+    
+    **Example use cases:**
+    - Modifying specific register values
+    - Skipping problematic code sections
+    - Implementing conditional patches
+    - Debugging register state
+  </Accordion>
+  
+  <Accordion title="Hook Installation Timing">
+    - Install hooks during initialization (`skyline_init` or `skyline_main`)
+    - Avoid installing hooks from multiple threads
+    - Don't install hooks in performance-critical paths
+    - Verify hook addresses before installation
+  </Accordion>
+  
+  <Accordion title="Error Handling">
+    ```cpp
+    void* trampoline = nullptr;
+    A64HookFunction(target, replacement, &trampoline);
+    
+    if (trampoline == nullptr) {
+        skyline::logger::s_Instance->Log("Hook failed!\\n");
+        return;
+    }
+    ```
+    
+    Always check if trampoline allocation succeeded.
+  </Accordion>
+</AccordionGroup>
+
+## Limitations
+
+<Warning>
+**Hook Capacity Limits:**
+- Maximum function hooks: 2048
+- Maximum inline hooks: 4096
+- Exceeding these limits will cause runtime errors
+</Warning>
+
+<Warning>
+**Branch Range:**
+If a hook target is too far from the JIT region, hooks will use the longer 5-instruction form, which may not fit in small functions.
+</Warning>
+
+<Warning>
+**Thread Safety:**
+While hook installation is thread-safe, the hooked functions themselves must handle concurrency appropriately.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory Management" icon="memory" href="/core/memory-management">
+    Understand controlled pages and JIT compilation
+  </Card>
+  <Card title="Plugin System" icon="puzzle-piece" href="/core/plugin-system">
+    Learn how to create plugins that use hooks
+  </Card>
+</CardGroup>

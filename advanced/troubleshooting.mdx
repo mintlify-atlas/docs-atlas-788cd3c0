@@ -1,0 +1,394 @@
+---
+title: 'Troubleshooting'
+description: 'Solutions to common Skyline issues and debugging techniques'
+---
+
+## Common Issues
+
+<AccordionGroup>
+  <Accordion title="Game crashes immediately on launch">
+    This is the most common issue and can have several causes:
+    
+    ### Check main.npdm Configuration
+    
+    1. Verify you're using the correct main.npdm for your game
+    2. If not modding Super Smash Bros. Ultimate, **remove** the default main.npdm file
+    3. Obtain a game-specific main.npdm from:
+       - The plugin developer
+       - Community resources
+       - Create your own using HACTool and npdmtool
+    
+    ### Verify Installation Path
+    
+    Ensure Skyline is installed at:
+    ```
+    atmosphere/contents/<game_title_id>/exefs/
+    ```
+    
+    Not:
+    ```
+    atmosphere/contents/<game_title_id>/exefs/exefs/  ❌ (nested exefs)
+    ```
+    
+    ### Check Game Compatibility
+    
+    Your game may require a modified version of Skyline. See the [Game Compatibility](/advanced/game-compatibility) page for game-specific forks.
+  </Accordion>
+
+  <Accordion title="Logger not connecting / TCP connection fails">
+    The TCP logger requires proper initialization and network setup.
+    
+    ### Verify Logger Setup
+    
+    From `source/main.cpp:111-113`:
+    ```cpp
+    nn::fs::MountSdCardForDebug("sd");
+    skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+    skyline::logger::s_Instance->Log("[skyline_main] Beginning initialization.\n");
+    ```
+    
+    ### Common Causes
+    
+    1. **Skyline built with NOLOG=1**: Rebuild without this flag
+    2. **Socket initialization failed**: Check socket hooks in `source/main.cpp:108`
+    3. **Network not configured**: Ensure your Switch has network access
+    4. **Firewall blocking connection**: Allow TCP connections from your Switch's IP
+    
+    ### Socket Pool Issues
+    
+    From `source/main.cpp:27-30`:
+    ```cpp
+    const size_t poolSize = 0x600000;  // 6MB socket pool
+    void* socketPool = memalign(0x4000, poolSize);
+    nn::socket::Initialize(socketPool, poolSize, 0x20000, 14);
+    ```
+    
+    If socket initialization fails, check Atmosphere's crash logs for memory allocation errors.
+    
+    <Warning>
+    Some games (Fire Emblem Three Houses, Pokemon Sword/Shield) initialize sockets differently and may cause conflicts. See compatibility notes.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Plugins not loading">
+    Plugins must be placed in the correct directory and meet specific requirements.
+    
+    ### Correct Plugin Path
+    
+    ```
+    atmosphere/contents/<game_title_id>/romfs/skyline/plugins/
+    ```
+    
+    Example:
+    ```
+    atmosphere/contents/01006A800016E000/romfs/skyline/plugins/libmyplugin.nro
+    ```
+    
+    ### Plugin Loading Sequence
+    
+    From `source/main.cpp:37-41`:
+    ```cpp
+    // Load plugins after RomFS is mounted
+    auto manager = new skyline::plugin::Manager();
+    manager->LoadPluginsImpl();
+    ```
+    
+    Plugins load **after** RomFS initialization, triggered by the game's call to `nn::fs::MountRom`.
+    
+    ### Debugging Plugin Issues
+    
+    1. Enable TCP logging to see plugin load messages
+    2. Verify plugin file permissions (should be readable)
+    3. Check plugin compatibility with your Skyline version
+    4. Ensure plugin is built for the correct game version
+    
+    <Note>
+    Plugins are loaded in a separate task queue thread with 0x10000 (64KB) stack size. Stack-heavy plugins may crash. See `source/main.cpp:58`.
+    </Note>
+  </Accordion>
+
+  <Accordion title="Exception handler / Crash debugging">
+    Skyline includes a custom exception handler that logs crash information.
+    
+    ### Exception Handler Setup
+    
+    From `source/main.cpp:11-24`:
+    ```cpp
+    char ALIGNA(0x1000) exception_handler_stack[0x4000];  // 16KB stack
+    nn::os::UserExceptionInfo exception_info;
+    
+    void exception_handler(nn::os::UserExceptionInfo* info) {
+        skyline::logger::s_Instance->LogFormat("Exception occurred!\n");
+        
+        skyline::logger::s_Instance->LogFormat("Error description: %x\n", info->ErrorDescription);
+        for (int i = 0; i < 29; i++)
+            skyline::logger::s_Instance->LogFormat("X[%02i]: %" PRIx64 "\n", i, info->CpuRegisters[i].x);
+        skyline::logger::s_Instance->LogFormat("FP: %" PRIx64 "\n", info->FP.x);
+        skyline::logger::s_Instance->LogFormat("LR: %" PRIx64 "\n", info->LR.x);
+        skyline::logger::s_Instance->LogFormat("SP: %" PRIx64 "\n", info->SP.x);
+        skyline::logger::s_Instance->LogFormat("PC: %" PRIx64 "\n", info->PC.x);
+    }
+    ```
+    
+    Registered at `source/main.cpp:116-117`:
+    ```cpp
+    nn::os::SetUserExceptionHandler(exception_handler, exception_handler_stack, 
+                                    sizeof(exception_handler_stack), &exception_info);
+    ```
+    
+    ### Reading Crash Logs
+    
+    Exception handler output includes:
+    - **Error description**: Exception type code
+    - **Register dump**: All ARM64 general-purpose registers (X0-X28)
+    - **FP**: Frame pointer
+    - **LR**: Link register (return address)
+    - **SP**: Stack pointer
+    - **PC**: Program counter (crash address)
+    
+    ### Finding Crash Location
+    
+    Use the PC (program counter) value with your build's `.map` file:
+    
+    ```bash
+    grep "<PC_address>" build600/Skyline600.map
+    ```
+    
+    <Tip>
+    The LR (link register) shows where the crashing function was called from, which is often more useful than the PC for debugging.
+    </Tip>
+    
+    ### VAbort Handler
+    
+    Skyline can also intercept game abort calls for better error reporting (currently commented out in `source/main.cpp:125-133`):
+    
+    ```cpp
+    // Hook abort to get crash info
+    // Note: This was commented out because some games do not use or have 
+    // certain variations of this symbol. Check Atmosphere's crash reports 
+    // or Ryujinx's output instead.
+    ```
+  </Accordion>
+
+  <Accordion title="RomFS not mounting / Plugin initialization delayed">
+    Skyline waits for the game to mount RomFS before loading plugins.
+    
+    ### RomFS Hook Mechanism
+    
+    From `source/main.cpp:46-64`:
+    ```cpp
+    Result (*nnFsMountRomImpl)(char const*, void*, unsigned long);
+    
+    Result handleNnFsMountRom(char const* path, void* buffer, unsigned long size) {
+        Result rc = nnFsMountRomImpl(path, buffer, size);
+        
+        skyline::utils::g_RomMountStr = std::string(path) + ":/";
+        
+        // Initialize task queue and load plugins
+        g_MountRomInit.call_once([]() {
+            skyline::utils::SafeTaskQueue* taskQueue = new skyline::utils::SafeTaskQueue(100);
+            taskQueue->startThread(20, 3, 0x10000);  // Priority 20, core 3, 64KB stack
+            taskQueue->push(new std::unique_ptr<skyline::utils::Task>(after_romfs_task));
+            nn::os::WaitEvent(&after_romfs_task->completionEvent);
+        });
+        
+        return rc;
+    }
+    ```
+    
+    Registered at `source/main.cpp:120-121`:
+    ```cpp
+    A64HookFunction(reinterpret_cast<void*>(nn::fs::MountRom), 
+                    reinterpret_cast<void*>(handleNnFsMountRom), 
+                    (void**)&nnFsMountRomImpl);
+    ```
+    
+    ### Multiple RomFS Mounts
+    
+    Some games (Persona 5 Royal) call `MountRom` multiple times. Skyline uses `call_once` to prevent double-initialization (see `source/main.cpp:54-61`).
+    
+    ### If Plugins Never Load
+    
+    1. Game may not use `nn::fs::MountRom` - requires custom hook
+    2. Hook failed to install - check for conflicting hooks
+    3. Task queue thread crashed - check exception handler logs
+  </Accordion>
+
+  <Accordion title="Memory allocation failures">
+    Skyline and plugins can encounter memory issues on resource-constrained games.
+    
+    ### Socket Pool Allocation
+    
+    From `source/main.cpp:27-28`:
+    ```cpp
+    const size_t poolSize = 0x600000;  // 6MB
+    void* socketPool = memalign(0x4000, poolSize);
+    ```
+    
+    If this allocation fails, logging won't work.
+    
+    ### Plugin Memory
+    
+    Plugins are loaded dynamically and consume heap memory. Large plugins may fail to load if the game has limited heap space.
+    
+    <Warning>
+    Plugin thread stack size is 0x10000 (64KB). Stack-intensive plugins will crash. See `source/main.cpp:58`.
+    </Warning>
+    
+    ### Debugging Memory Issues
+    
+    Check memory region info logged at startup (`source/main.cpp:135-139`):
+    ```cpp
+    skyline::logger::s_Instance->LogFormat(
+        "[skyline_main] text: 0x%" PRIx64 " | rodata: 0x%" PRIx64
+        " | data: 0x%" PRIx64 " | bss: 0x%" PRIx64 " | heap: 0x%" PRIx64,
+        skyline::utils::g_MainTextAddr, skyline::utils::g_MainRodataAddr,
+        skyline::utils::g_MainDataAddr, skyline::utils::g_MainBssAddr,
+        skyline::utils::g_MainHeapAddr);
+    ```
+  </Accordion>
+
+  <Accordion title="nn::ro::Initialize hook not working">
+    Skyline hooks the dynamic linker initialization to ensure plugins can use dynamic linking.
+    
+    ### nn::ro Hook
+    
+    From `source/main.cpp:87-99`:
+    ```cpp
+    static skyline::utils::Once g_RoInit;
+    Result (*nnRoInitializeImpl)();
+    
+    Result nn_ro_init() {
+        Result ret = 0;
+        
+        g_RoInit.call_once([&ret]() {
+            ret = nnRoInitializeImpl();
+            skyline::logger::s_Instance->LogFormat(
+                "[skyline_main] Ran hooked nn::ro::initialize (0x%x)", ret);
+        });
+        
+        return ret;
+    }
+    ```
+    
+    Registered at `source/main.cpp:123`:
+    ```cpp
+    A64HookFunction(reinterpret_cast<void*>(nn::ro::Initialize), 
+                    reinterpret_cast<void*>(nn_ro_init), 
+                    (void**)&nnRoInitializeImpl);
+    ```
+    
+    If this hook fails, plugins may not load correctly due to linking issues.
+  </Accordion>
+</AccordionGroup>
+
+## Debugging Techniques
+
+### Enable TCP Logging
+
+<Steps>
+  <Step title="Build with logging enabled">
+    Ensure Skyline is built WITHOUT the `NOLOG=1` flag:
+    
+    ```bash
+    make CROSSVER=600  # Logging enabled by default
+    ```
+  </Step>
+  
+  <Step title="Set up TCP listener">
+    On your computer, listen for TCP connections:
+    
+    ```bash
+    nc -l 6969  # Default port
+    ```
+    
+    Or use a GUI tool like Hercules or SocketTest.
+  </Step>
+  
+  <Step title="Launch the game">
+    Skyline will connect to your computer and stream log messages in real-time.
+  </Step>
+</Steps>
+
+<Note>
+You may need to modify the logger IP address in the source code to match your computer's IP on the local network.
+</Note>
+
+### Use Atmosphere Crash Reports
+
+Atmosphere generates detailed crash reports at:
+
+```
+atmosphere/crash_reports/
+```
+
+These reports include:
+- Complete register dump
+- Stack trace
+- Memory info
+- Module load addresses
+
+### Check Ryujinx / Yuzu Output
+
+When testing on emulators:
+- **Ryujinx**: Provides detailed logging output
+- **Yuzu**: Shows dynamic library loading and hook information
+
+<Warning>
+Emulator behavior may differ from real hardware. Always test on actual Switch hardware for production plugins.
+</Warning>
+
+### Memory Region Analysis
+
+Skyline logs memory regions at startup (`source/main.cpp:135-139`):
+
+```
+[skyline_main] text: 0x... | rodata: 0x... | data: 0x... | bss: 0x... | heap: 0x...
+```
+
+Use these addresses to:
+- Calculate offsets for hooks
+- Understand memory layout
+- Debug pointer issues
+
+## Performance Issues
+
+<Accordion title="Game runs slower with Skyline loaded">
+  This can happen due to:
+  
+  1. **Heavy logging**: Disable verbose logging in production builds
+  2. **Plugin overhead**: Profile plugins to identify performance bottlenecks
+  3. **Hook overhead**: Minimize number of hooks and use efficient hook implementations
+</Accordion>
+
+<Accordion title="Long loading times">
+  Plugin loading happens during RomFS mount, which can delay game startup.
+  
+  - Reduce number of plugins
+  - Optimize plugin initialization code
+  - Profile plugin load time with TCP logging
+</Accordion>
+
+## Getting Additional Help
+
+### Information to Provide
+
+When asking for help, include:
+
+1. **Game title and version**
+2. **Skyline version or build date**
+3. **Complete crash log** (TCP output or Atmosphere crash report)
+4. **Plugin list** (if applicable)
+5. **Build configuration** (CROSSVER, any custom flags)
+6. **Installation path verification**
+
+### Useful Resources
+
+- **Atmosphere logs**: `/atmosphere/crash_reports/`
+- **Build map file**: `build$(CROSSVER)/Skyline$(CROSSVER).map`
+- **Exception handler output**: Via TCP logger
+- **Memory region info**: Logged at startup
+
+<Tip>
+The memory region addresses logged at startup (text, rodata, data, bss, heap) are crucial for diagnosing hooking and pointer issues. Always include these in bug reports.
+</Tip>

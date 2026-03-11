@@ -1,0 +1,361 @@
+---
+title: TcpLogger
+description: Network-based logger for real-time debugging over TCP
+---
+
+## Overview
+
+`TcpLogger` provides real-time network-based logging over a TCP socket connection. It's the default logger used in Skyline and is ideal for interactive debugging and monitoring.
+
+**Header:** `skyline/logger/TcpLogger.hpp`
+
+## Class Definition
+
+```cpp
+namespace skyline::logger {
+    class TcpLogger : public Logger {
+    public:
+        virtual void Initialize();
+        virtual bool ShouldFlush() override;
+        virtual void SendRaw(void* data, size_t size);
+        virtual std::string FriendlyName() { return "TcpLogger"; }
+    };
+
+    void setup_socket_hooks();
+}
+```
+
+---
+
+## Setup and Initialization
+
+### Basic Setup
+
+From `main.cpp`, the typical initialization sequence is:
+
+```cpp
+#include "skyline/logger/TcpLogger.hpp"
+
+void skyline_main() {
+    // Initialize hooking
+    A64HookInit();
+    
+    // Setup socket hooks (required before creating TcpLogger)
+    skyline::logger::setup_socket_hooks();
+    
+    // Mount SD card for debug
+    nn::fs::MountSdCardForDebug("sd");
+    
+    // Create and assign logger instance
+    skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+    
+    // Start logging immediately (queued until socket connects)
+    skyline::logger::s_Instance->Log("[skyline_main] Beginning initialization.\n");
+    
+    // Later, after socket initialization in your code:
+    // skyline::logger::s_Instance->StartThread();
+}
+```
+
+### Socket Initialization
+
+<Warning>
+TcpLogger requires socket initialization before the logger thread can accept connections. The `setup_socket_hooks()` function must be called early to prevent double initialization crashes.
+</Warning>
+
+From the actual usage in `main.cpp`:
+
+```cpp
+static skyline::utils::Task* after_romfs_task = new skyline::utils::Task{[]() {
+    // Allocate socket pool
+    const size_t poolSize = 0x600000;
+    void* socketPool = memalign(0x4000, poolSize);
+    
+    // Initialize sockets
+    nn::socket::Initialize(socketPool, poolSize, 0x20000, 14);
+    
+    // Now start the logger thread
+    skyline::logger::s_Instance->StartThread();
+}};
+```
+
+---
+
+## Network Configuration
+
+### Connection Details
+
+<Info>
+TcpLogger binds to port **6969** and accepts incoming connections on any network interface.
+</Info>
+
+```cpp
+#define PORT 6969
+```
+
+**Connection Flow:**
+
+1. TcpLogger creates a TCP socket using `nn::socket::Socket(AF_INET, SOCK_STREAM, 0)`
+2. Binds to `INADDR_ANY:6969` to accept connections from any IP
+3. Listens for incoming connections with `nn::socket::Listen()`
+4. Accepts the first client connection
+5. Sends confirmation message: `"TCP Socket Connnected.\n"`
+
+### Connecting to TcpLogger
+
+From your development machine, connect using any TCP client:
+
+<CodeGroup>
+
+```bash netcat
+# Using netcat
+nc <switch-ip-address> 6969
+```
+
+```bash telnet
+# Using telnet
+telnet <switch-ip-address> 6969
+```
+
+```python Python
+import socket
+
+def connect_to_skyline(switch_ip):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((switch_ip, 6969))
+    
+    # Read connection message
+    print(sock.recv(1024).decode())
+    
+    # Read logs
+    while True:
+        data = sock.recv(4096)
+        if not data:
+            break
+        print(data.decode(), end='')
+
+connect_to_skyline('192.168.1.100')
+```
+
+</CodeGroup>
+
+---
+
+## Class Methods
+
+### Initialize
+
+```cpp
+virtual void Initialize()
+```
+
+Empty implementation - TcpLogger initialization is handled by `setup_socket_hooks()` and the background thread.
+
+### ShouldFlush
+
+```cpp
+virtual bool ShouldFlush() override
+```
+
+**Returns:** `true` if the logger is initialized and has an active client connection, `false` otherwise.
+
+This prevents attempting to send data before a client connects. Messages remain queued until a connection is established.
+
+**Implementation:**
+
+```cpp
+bool TcpLogger::ShouldFlush() {
+    return g_loggerInit && (g_tcpSocket != -1);
+}
+```
+
+### SendRaw
+
+```cpp
+virtual void SendRaw(void* data, size_t size)
+```
+
+<ParamField path="data" type="void*" required>
+  Pointer to data buffer to send over the network
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to send
+</ParamField>
+
+Sends raw data over the TCP socket using `nn::socket::Send()`.
+
+**Implementation:**
+
+```cpp
+void TcpLogger::SendRaw(void* data, size_t size) {
+    nn::socket::Send(g_tcpSocket, data, size, 0);
+}
+```
+
+### FriendlyName
+
+```cpp
+virtual std::string FriendlyName()
+```
+
+**Returns:** `"TcpLogger"`
+
+---
+
+## Socket Hooks
+
+### setup_socket_hooks
+
+```cpp
+void setup_socket_hooks()
+```
+
+<Warning>
+**Must be called before any socket initialization!** This function hooks the socket initialization functions to prevent double-initialization crashes.
+</Warning>
+
+This function installs hooks for:
+
+- `nn::socket::Initialize(void*, ulong, ulong, int)` - Standard pool initialization
+- `nn::socket::Initialize(nn::socket::Config const&)` - Config-based initialization  
+- `nn::socket::Finalize()` - Prevents socket deinitialization
+
+**Purpose:** Some games initialize sockets themselves. These hooks ensure:
+
+1. Sockets are only initialized once (prevents crash)
+2. Logger thread starts after socket initialization
+3. Sockets remain active (Finalize is stubbed)
+
+**Usage:**
+
+```cpp
+void skyline_main() {
+    A64HookInit();
+    
+    // Call this BEFORE creating TcpLogger
+    skyline::logger::setup_socket_hooks();
+    
+    skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+    // ...
+}
+```
+
+---
+
+## Advanced Usage
+
+### External C Function
+
+TcpLogger exports a C-compatible function for external use:
+
+```cpp
+extern "C" void skyline_tcp_send_raw(char* data, size_t size);
+```
+
+<ParamField path="data" type="char*" required>
+  Raw data buffer to send
+</ParamField>
+
+<ParamField path="size" type="size_t" required>
+  Number of bytes to send (uses `u64` internally)
+</ParamField>
+
+This allows logging from C code or external plugins:
+
+```c
+// From C code
+extern void skyline_tcp_send_raw(char* data, size_t size);
+
+void my_c_function() {
+    skyline_tcp_send_raw("Message from C code\n", 21);
+}
+```
+
+### Connection Configuration
+
+The logger uses SO_KEEPALIVE to maintain persistent connections:
+
+```cpp
+int flags = 1;
+nn::socket::SetSockOpt(g_tcpSocket, SOL_SOCKET, SO_KEEPALIVE, &flags, sizeof(flags));
+```
+
+---
+
+## Common Issues
+
+### Socket Already Initialized Error
+
+**Problem:** Game crashes when creating TcpLogger
+
+**Solution:** Ensure `setup_socket_hooks()` is called before any socket initialization:
+
+```cpp
+// Correct order:
+skyline::logger::setup_socket_hooks();  // First
+skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+```
+
+### No Connection / Logs Not Appearing
+
+**Problem:** Cannot connect or no logs appear
+
+**Checklist:**
+
+1. ✅ Called `setup_socket_hooks()` early
+2. ✅ Called `StartThread()` after socket initialization
+3. ✅ Switch and PC are on the same network
+4. ✅ Port 6969 is not blocked by firewall
+5. ✅ Using correct Switch IP address
+
+### Delayed Initialization Games
+
+<Note>
+Some games (Fire Emblem Three Houses, Pokémon Sword/Shield) initialize sockets using `Config` variant early. The hooks handle both initialization methods.
+</Note>
+
+---
+
+## Example: Complete Setup
+
+```cpp
+#include "skyline/logger/TcpLogger.hpp"
+#include "skyline/utils/cpputils.hpp"
+
+void skyline_main() {
+    // 1. Initialize hooking framework
+    A64HookInit();
+    
+    // 2. Setup socket hooks (prevents double-init crashes)
+    skyline::logger::setup_socket_hooks();
+    
+    // 3. Mount SD card (required for some operations)
+    nn::fs::MountSdCardForDebug("sd");
+    
+    // 4. Create TcpLogger instance
+    skyline::logger::s_Instance = new skyline::logger::TcpLogger();
+    
+    // 5. Start logging (messages queued until socket connects)
+    skyline::logger::s_Instance->Log("[skyline_main] Beginning initialization.\n");
+    
+    // 6. Later: Initialize sockets and start logger thread
+    //    (typically done after romfs mount in a task)
+    const size_t poolSize = 0x600000;
+    void* socketPool = memalign(0x4000, poolSize);
+    nn::socket::Initialize(socketPool, poolSize, 0x20000, 14);
+    
+    skyline::logger::s_Instance->StartThread();
+    
+    // 7. Now logging is fully active
+    skyline::logger::s_Instance->LogFormat("[%s] Logger initialized.", 
+                                           skyline::logger::s_Instance->FriendlyName().c_str());
+}
+```
+
+---
+
+## See Also
+
+- [Logger Overview](/api/logger/overview) - Base logger interface and architecture
+- [SdLogger](/api/logger/sd-logger) - File-based logging alternative

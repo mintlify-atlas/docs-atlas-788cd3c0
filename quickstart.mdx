@@ -1,80 +1,598 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: 'Quick Start'
+description: 'Create your first Skyline plugin in minutes'
 ---
 
-## Get started in three steps
+# Quick Start Guide
 
-Get your documentation site running locally and make your first customization.
+This guide will walk you through creating your first Skyline plugin - a simple mod that hooks a function and logs messages.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+Before creating plugins, ensure you have:
+
+- **devkitPro** installed with devkitA64
+- **libnx** Switch development libraries
+- **Skyline** installed on your Switch ([Installation Guide](/installation))
+- Basic knowledge of C/C++
+- A text editor or IDE
+
+### Setting Up devkitPro
+
+<Steps>
+  <Step title="Install devkitPro">
+    Follow the [official devkitPro installation guide](https://devkitpro.org/wiki/Getting_Started) for your platform.
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    On Linux:
+    ```bash
+    wget https://github.com/devkitPro/pacman/releases/latest/download/devkitpro-pacman.amd64.deb
+    sudo dpkg -i devkitpro-pacman.amd64.deb
+    ```
+  </Step>
+
+  <Step title="Install Switch Development Tools">
+    ```bash
+    sudo dkp-pacman -S switch-dev
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    This installs:
+    - devkitA64 ARM64 compiler
+    - libnx Nintendo Switch libraries
+    - Switch build tools
+  </Step>
 
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+  <Step title="Set Environment Variables">
+    Add to your `.bashrc` or `.zshrc`:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    export DEVKITPRO=/opt/devkitpro
+    export DEVKITARM=$DEVKITPRO/devkitARM
+    export DEVKITA64=$DEVKITPRO/devkitA64
+    ```
+    
+    Reload your shell:
+    ```bash
+    source ~/.bashrc
+    ```
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Plugin Structure
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+A Skyline plugin is an **NRO (Nintendo Relocatable Object)** file with:
 
-### Step 3: Go live
+1. A `main()` function as the entry point
+2. Hooks to game functions using `A64HookFunction()`
+3. Access to Skyline's logger and utilities
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+### Basic Plugin Anatomy
 
-## Next steps
+```cpp
+#include "main.hpp"  // Skyline main header
 
-Now that you have your docs running, explore these key features:
+extern "C" void main() {
+    // Your plugin initialization code
+}
+```
+
+The `main()` function is called by the PluginManager (`PluginManager.cpp:194`) after the plugin is loaded:
+
+```cpp
+void (*pluginEntrypoint)() = NULL;
+nn::ro::LookupModuleSymbol(reinterpret_cast<uintptr_t*>(&pluginEntrypoint), &plugin.Module, "main");
+if (pluginEntrypoint != NULL) {
+    pluginEntrypoint();
+}
+```
+
+## Creating Your First Plugin
+
+Let's create a simple plugin that logs messages and hooks a function.
+
+<Steps>
+  <Step title="Create Project Directory">
+    ```bash
+    mkdir my-first-plugin
+    cd my-first-plugin
+    ```
+  </Step>
+
+  <Step title="Create Source File">
+    Create `source/main.cpp`:
+    
+    ```cpp
+    #include "main.hpp"
+
+    // Original function pointer
+    void (*original_function)();
+
+    // Our hook function
+    void hooked_function() {
+        skyline::logger::s_Instance->Log("[MyPlugin] Hook called!\n");
+        
+        // Call the original function
+        if (original_function) {
+            original_function();
+        }
+    }
+
+    extern "C" void main() {
+        skyline::logger::s_Instance->Log("[MyPlugin] Initializing...\n");
+        
+        // Log some useful information
+        skyline::logger::s_Instance->LogFormat(
+            "[MyPlugin] Text: 0x%" PRIx64 " | Heap: 0x%" PRIx64 "\n",
+            skyline::utils::g_MainTextAddr,
+            skyline::utils::g_MainHeapAddr
+        );
+        
+        // Install a hook (example - replace with actual game function)
+        // A64HookFunction(
+        //     reinterpret_cast<void*>(GAME_FUNCTION_ADDRESS),
+        //     reinterpret_cast<void*>(hooked_function),
+        //     (void**)&original_function
+        // );
+        
+        skyline::logger::s_Instance->Log("[MyPlugin] Initialization complete!\n");
+    }
+    ```
+    
+    <Info>
+    The `skyline::logger::s_Instance` global logger is initialized in `main.cpp:112` and available to all plugins.
+    </Info>
+  </Step>
+
+  <Step title="Create Makefile">
+    Create `Makefile`:
+    
+    ```makefile
+    .PHONY: all clean
+
+    NAME := my-first-plugin
+
+    all:
+    	$(MAKE) -f plugin.mk TARGET=$(NAME)
+
+    clean:
+    	$(MAKE) -f plugin.mk TARGET=$(NAME) clean
+    	rm -f $(NAME).nro
+    ```
+  </Step>
+
+  <Step title="Create Build Rules">
+    Create `plugin.mk` (adapted from Skyline's build system):
+    
+    ```makefile
+    ifeq ($(strip $(DEVKITPRO)),)
+    $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/devkitpro")
+    endif
+
+    include $(DEVKITPRO)/libnx/switch_rules
+
+    TARGET   ?= plugin
+    BUILD    := build
+    SOURCES  := source
+    INCLUDES := include
+
+    # Architecture and flags
+    ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC
+
+    CFLAGS := -g -Wall -O2 -ffunction-sections \
+              $(ARCH) $(INCLUDE) -D__SWITCH__
+
+    CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++20
+
+    LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) \
+               -Wl,-Map,$(TARGET).map
+
+    LIBS := -lnx
+
+    # Source files
+    CPPFILES := $(foreach dir,$(SOURCES),$(wildcard $(dir)/*.cpp))
+    OFILES   := $(CPPFILES:.cpp=.o)
+
+    all: $(TARGET).nro
+
+    %.nro: %.elf
+    	elf2nro $< $@
+    	@echo "Built: $(TARGET).nro"
+
+    $(TARGET).elf: $(OFILES)
+    	$(CXX) $(LDFLAGS) -o $@ $^ $(LIBS)
+
+    clean:
+    	rm -f $(OFILES) $(TARGET).elf $(TARGET).nro $(TARGET).map
+    ```
+  </Step>
+
+  <Step title="Build the Plugin">
+    ```bash
+    make
+    ```
+    
+    This compiles your plugin into `my-first-plugin.nro`.
+    
+    <Note>
+    If you get errors about missing headers, ensure Skyline's include directory is in your include path, or copy the necessary headers from the Skyline repository.
+    </Note>
+  </Step>
+
+  <Step title="Install the Plugin">
+    Copy the `.nro` file to your Switch:
+    
+    ```bash
+    cp my-first-plugin.nro /path/to/sd/atmosphere/contents/01006A800016E000/romfs/skyline/plugins/
+    ```
+    
+    Or use FTP:
+    ```bash
+    curl -T my-first-plugin.nro ftp://switch-ip/atmosphere/contents/01006A800016E000/romfs/skyline/plugins/
+    ```
+  </Step>
+
+  <Step title="Test the Plugin">
+    1. Insert your SD card back into your Switch
+    2. Launch Super Smash Bros. Ultimate
+    3. Connect to the TCP logger:
+       ```bash
+       nc <switch-ip> 6969
+       ```
+    4. Look for your plugin's messages:
+       ```
+       [PluginManager] Loading plugins...
+       [PluginManager] Loaded 'rom:/skyline/plugins/my-first-plugin.nro'
+       [PluginManager] Running `main` for rom:/skyline/plugins/my-first-plugin.nro
+       [MyPlugin] Initializing...
+       [MyPlugin] Text: 0x... | Heap: 0x...
+       [MyPlugin] Initialization complete!
+       ```
+  </Step>
+</Steps>
+
+## Using the Logger
+
+Skyline provides a powerful logging system defined in `skyline/logger/Logger.hpp:14`.
+
+### Basic Logging
+
+```cpp
+// Log a simple string
+skyline::logger::s_Instance->Log("Hello from plugin\n");
+
+// Log a std::string
+std::string message = "Dynamic message";
+skyline::logger::s_Instance->Log(message);
+```
+
+### Formatted Logging
+
+```cpp
+// Printf-style formatting
+skyline::logger::s_Instance->LogFormat(
+    "Value: %d, Hex: 0x%X, Pointer: %p\n",
+    42, 0xDEADBEEF, some_pointer
+);
+
+// 64-bit values
+skyline::logger::s_Instance->LogFormat(
+    "Address: 0x%" PRIx64 "\n",
+    some_64bit_address
+);
+```
+
+### Raw Output
+
+```cpp
+// Send raw bytes (useful for binary data)
+char data[] = "Raw data";
+skyline::logger::s_Instance->SendRaw(data, sizeof(data));
+
+// Send raw string
+skyline::logger::s_Instance->SendRaw("No buffering\n");
+```
+
+<Warning>
+`SendRaw()` bypasses the logging queue and sends immediately. Use `Log()` for normal messages.
+</Warning>
+
+## Hooking Functions
+
+The core of Skyline plugins is **function hooking** using `A64HookFunction()` from `And64InlineHook.hpp:58`.
+
+### Hook Signature
+
+```cpp
+extern "C" void A64HookFunction(
+    void* const symbol,      // Address of function to hook
+    void* const replace,     // Your replacement function
+    void** result           // Pointer to store original function
+);
+```
+
+### Basic Hook Example
+
+```cpp
+// Function pointers
+typedef void (*SomeGameFunction)(int param);
+SomeGameFunction original_game_function = nullptr;
+
+// Your hook
+void my_hook(int param) {
+    skyline::logger::s_Instance->LogFormat(
+        "[Hook] Called with param: %d\n", param
+    );
+    
+    // Modify behavior
+    if (param == 42) {
+        skyline::logger::s_Instance->Log("[Hook] Special value detected!\n");
+    }
+    
+    // Call original with modified parameter
+    original_game_function(param * 2);
+}
+
+// Install the hook
+extern "C" void main() {
+    A64HookFunction(
+        reinterpret_cast<void*>(0x71000XXXXX),  // Game function address
+        reinterpret_cast<void*>(my_hook),
+        (void**)&original_game_function
+    );
+}
+```
+
+### Hook with Return Value
+
+```cpp
+typedef int (*CalculateFunction)(float a, float b);
+CalculateFunction original_calculate = nullptr;
+
+int hooked_calculate(float a, float b) {
+    int result = original_calculate(a, b);
+    
+    skyline::logger::s_Instance->LogFormat(
+        "[Hook] calculate(%.2f, %.2f) = %d\n",
+        a, b, result
+    );
+    
+    // Modify return value
+    return result + 10;
+}
+```
+
+### Hook with Complex Types
+
+```cpp
+struct Vector3 {
+    float x, y, z;
+};
+
+typedef void (*SetPositionFunc)(void* entity, Vector3* pos);
+SetPositionFunc original_set_position = nullptr;
+
+void hooked_set_position(void* entity, Vector3* pos) {
+    skyline::logger::s_Instance->LogFormat(
+        "[Hook] SetPosition: (%.2f, %.2f, %.2f)\n",
+        pos->x, pos->y, pos->z
+    );
+    
+    // Prevent going out of bounds
+    if (pos->y < 0) {
+        skyline::logger::s_Instance->Log("[Hook] Prevented OOB!\n");
+        pos->y = 0;
+    }
+    
+    original_set_position(entity, pos);
+}
+```
+
+<Tip>
+Use IDA Pro, Ghidra, or other reverse engineering tools to find function addresses in the game binary.
+</Tip>
+
+## Complete Working Example
+
+Here's a complete plugin that demonstrates logging, hooking, and error handling:
+
+<CodeGroup>
+```cpp source/main.cpp
+#include "main.hpp"
+
+// Hook for a hypothetical game initialization function
+typedef void (*GameInitFunc)();
+GameInitFunc original_game_init = nullptr;
+
+void hooked_game_init() {
+    skyline::logger::s_Instance->Log("[MyMod] Game initializing!\n");
+    skyline::logger::s_Instance->Log("[MyMod] Installing custom features...\n");
+    
+    // Call original initialization
+    if (original_game_init) {
+        original_game_init();
+    }
+    
+    skyline::logger::s_Instance->Log("[MyMod] Game init hooked successfully!\n");
+}
+
+// Hook for a frame update function
+typedef void (*UpdateFunc)(float deltaTime);
+UpdateFunc original_update = nullptr;
+int frame_count = 0;
+
+void hooked_update(float deltaTime) {
+    frame_count++;
+    
+    // Log every 60 frames (about once per second)
+    if (frame_count % 60 == 0) {
+        skyline::logger::s_Instance->LogFormat(
+            "[MyMod] Frame %d, DeltaTime: %.4f\n",
+            frame_count, deltaTime
+        );
+    }
+    
+    // Call original update
+    original_update(deltaTime);
+}
+
+extern "C" void main() {
+    skyline::logger::s_Instance->Log("====================================\n");
+    skyline::logger::s_Instance->Log("[MyMod] Plugin Loading\n");
+    skyline::logger::s_Instance->Log("[MyMod] Version: 1.0.0\n");
+    skyline::logger::s_Instance->Log("====================================\n");
+    
+    // Log memory regions
+    skyline::logger::s_Instance->LogFormat(
+        "[MyMod] Memory Layout:\n"
+        "  Text:   0x%" PRIx64 "\n"
+        "  RoData: 0x%" PRIx64 "\n"
+        "  Data:   0x%" PRIx64 "\n"
+        "  BSS:    0x%" PRIx64 "\n"
+        "  Heap:   0x%" PRIx64 "\n",
+        skyline::utils::g_MainTextAddr,
+        skyline::utils::g_MainRodataAddr,
+        skyline::utils::g_MainDataAddr,
+        skyline::utils::g_MainBssAddr,
+        skyline::utils::g_MainHeapAddr
+    );
+    
+    // Install hooks
+    skyline::logger::s_Instance->Log("[MyMod] Installing hooks...\n");
+    
+    // Example: Hook game init (replace with actual address)
+    // A64HookFunction(
+    //     reinterpret_cast<void*>(0x71XXXXXXXX),
+    //     reinterpret_cast<void*>(hooked_game_init),
+    //     (void**)&original_game_init
+    // );
+    
+    // Example: Hook update loop (replace with actual address)
+    // A64HookFunction(
+    //     reinterpret_cast<void*>(0x71YYYYYYYY),
+    //     reinterpret_cast<void*>(hooked_update),
+    //     (void**)&original_update
+    // );
+    
+    skyline::logger::s_Instance->Log("[MyMod] Hooks installed!\n");
+    skyline::logger::s_Instance->Log("[MyMod] Plugin loaded successfully\n");
+}
+```
+
+```makefile Makefile
+.PHONY: all clean install
+
+NAME := my-mod
+SWITCH_IP := 192.168.1.100
+TITLE_ID := 01006A800016E000
+PLUGIN_PATH := /atmosphere/contents/$(TITLE_ID)/romfs/skyline/plugins
+
+all:
+	$(MAKE) -f plugin.mk TARGET=$(NAME)
+
+clean:
+	$(MAKE) -f plugin.mk TARGET=$(NAME) clean
+	rm -f $(NAME).nro
+
+install: all
+	@echo "Installing to Switch at $(SWITCH_IP)..."
+	curl -T $(NAME).nro ftp://$(SWITCH_IP)$(PLUGIN_PATH)/
+	@echo "Installation complete!"
+```
+</CodeGroup>
+
+## Best Practices
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Always Check Pointers" icon="shield-check">
+    Before calling original functions, verify they're not null:
+    ```cpp
+    if (original_func) {
+        original_func();
+    }
+    ```
+  </Card>
+  
+  <Card title="Use Descriptive Prefixes" icon="tag">
+    Prefix all log messages with your plugin name:
+    ```cpp
+    [MyPlugin] Message here
+    ```
+  </Card>
+  
+  <Card title="Handle Exceptions" icon="triangle-exclamation">
+    Skyline's exception handler will catch crashes, but try-catch around risky operations:
+    ```cpp
+    try {
+        risky_operation();
+    } catch (...) {
+        logger->Log("Error occurred\n");
+    }
+    ```
+  </Card>
+  
+  <Card title="Log Important Events" icon="list">
+    Log plugin lifecycle events:
+    - Initialization
+    - Hook installation
+    - Errors and warnings
+    - Important state changes
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Debugging Tips
+
+### View All Loaded Plugins
+
+Check the TCP log output after game launch:
+```
+[PluginManager] Initializing plugins...
+[PluginManager] Opening plugins...
+[PluginManager] Read rom:/skyline/plugins/plugin1.nro
+[PluginManager] Read rom:/skyline/plugins/plugin2.nro
+[PluginManager] Loading plugins...
+[PluginManager] Loaded 'rom:/skyline/plugins/plugin1.nro'
+[PluginManager] Running `main` for rom:/skyline/plugins/plugin1.nro
+```
+
+### Common Errors
+
+<AccordionGroup>
+  <Accordion title="Failed to get NRO buffer size">
+    Your plugin is not a valid NRO file. Ensure:
+    - Built with correct linker flags
+    - Using `elf2nro` to convert ELF to NRO
+    - File is not corrupted
+  </Accordion>
+  
+  <Accordion title="Failed to lookup symbol">
+    Your plugin is missing the `main()` function or it's not exported correctly. Ensure:
+    - Function is declared as `extern "C" void main()`
+    - Not stripped during linking
+  </Accordion>
+  
+  <Accordion title="Game crashes after hook">
+    Your hook function signature doesn't match the original:
+    - Check parameter types and count
+    - Verify calling convention
+    - Ensure proper pointer handling
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Plugin Structure" icon="rocket" href="/plugins/plugin-structure">
+    Learn about plugin structure and build system
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/api/hooks/function-hooks">
+    Explore Skyline's full API documentation
+  </Card>
+  
+  <Card title="Example Plugins" icon="code" href="/plugins/examples">
+    Browse community plugin examples
+  </Card>
+  
+  <Card title="Troubleshooting" icon="magnifying-glass" href="/advanced/troubleshooting">
+    Debug issues and solve common problems
+  </Card>
+</CardGroup>

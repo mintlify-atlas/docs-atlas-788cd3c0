@@ -1,0 +1,377 @@
+---
+title: 'IPC Utilities'
+description: 'Inter-process communication utilities for service calls and HIPC protocol'
+---
+
+The IPC utilities provide a wrapper around Nintendo's HIPC (Horizon IPC) protocol for communicating with system services on the Nintendo Switch.
+
+## Overview
+
+These utilities simplify the process of creating service connections, dispatching requests, and parsing responses when communicating with Nintendo Switch system services.
+
+## Functions
+
+### nnServiceCreate
+
+Creates a new service connection by name.
+
+```cpp
+Result nnServiceCreate(Service* srv, const char* name)
+```
+
+<ParamField path="srv" type="Service*" required>
+  Pointer to a Service structure that will be populated with the connection details
+</ParamField>
+
+<ParamField path="name" type="const char*" required>
+  Name of the service to connect to (e.g., "pm:dmnt", "fs-srv")
+</ParamField>
+
+<ResponseField name="Result" type="Result">
+  Returns 0 on success, or an error code on failure
+</ResponseField>
+
+**Implementation Details:**
+- Initializes HIPC service resolution
+- Connects to the named service
+- Queries the pointer buffer size via control request 3
+- Populates the Service structure with session handle and configuration
+
+**Example:**
+```cpp
+Service srv;
+Result rc = skyline::utils::nnServiceCreate(&srv, "pm:dmnt");
+if (R_SUCCEEDED(rc)) {
+    // Service connected successfully
+}
+```
+
+---
+
+### nnServiceClose
+
+Closes a service connection and cleans up resources.
+
+```cpp
+void nnServiceClose(Service* s)
+```
+
+<ParamField path="s" type="Service*" required>
+  Pointer to the Service structure to close
+</ParamField>
+
+**Implementation Details:**
+- Sends a close request to the service
+- Closes the session handle if owned
+- Resets the Service structure to zero
+
+**Example:**
+```cpp
+Service srv;
+nnServiceCreate(&srv, "pm:dmnt");
+// ... use service ...
+nnServiceClose(&srv);
+```
+
+---
+
+### nnServiceMakeRequest
+
+Constructs an IPC request in the TLS message buffer.
+
+```cpp
+void* nnServiceMakeRequest(
+    Service* s,
+    u32 request_id,
+    u32 context,
+    u32 data_size,
+    bool send_pid,
+    const SfBufferAttrs buffer_attrs,
+    const SfBuffer* buffers,
+    u32 num_objects,
+    const Service* const* objects,
+    u32 num_handles,
+    const Handle* handles
+)
+```
+
+<ParamField path="s" type="Service*" required>
+  Service to send the request to
+</ParamField>
+
+<ParamField path="request_id" type="u32" required>
+  Command ID for the service request
+</ParamField>
+
+<ParamField path="context" type="u32" required>
+  Request context value
+</ParamField>
+
+<ParamField path="data_size" type="u32" required>
+  Size of the input data in bytes
+</ParamField>
+
+<ParamField path="send_pid" type="bool" required>
+  Whether to send the process ID with the request
+</ParamField>
+
+<ParamField path="buffer_attrs" type="SfBufferAttrs" required>
+  Buffer attributes for up to 8 buffers
+</ParamField>
+
+<ParamField path="buffers" type="const SfBuffer*" required>
+  Array of buffer descriptors
+</ParamField>
+
+<ParamField path="num_objects" type="u32" required>
+  Number of service objects to send
+</ParamField>
+
+<ParamField path="objects" type="const Service* const*" required>
+  Array of service objects
+</ParamField>
+
+<ParamField path="num_handles" type="u32" required>
+  Number of handles to send
+</ParamField>
+
+<ParamField path="handles" type="const Handle*" required>
+  Array of handles to send
+</ParamField>
+
+<ResponseField name="return" type="void*">
+  Pointer to the data section of the request buffer
+</ResponseField>
+
+<Note>
+  This is a low-level function typically used internally by the dispatch macros.
+</Note>
+
+---
+
+### nnServiceParseResponse
+
+Parses an IPC response from the TLS message buffer.
+
+```cpp
+Result nnServiceParseResponse(
+    Service* s,
+    u32 out_size,
+    void** out_data,
+    u32 num_out_objects,
+    Service* out_objects,
+    const SfOutHandleAttrs out_handle_attrs,
+    Handle* out_handles
+)
+```
+
+<ParamField path="s" type="Service*" required>
+  Service that sent the response
+</ParamField>
+
+<ParamField path="out_size" type="u32" required>
+  Expected size of output data in bytes
+</ParamField>
+
+<ParamField path="out_data" type="void**">
+  Pointer to receive the output data pointer
+</ParamField>
+
+<ParamField path="num_out_objects" type="u32" required>
+  Number of service objects expected in response
+</ParamField>
+
+<ParamField path="out_objects" type="Service*">
+  Array to receive output service objects
+</ParamField>
+
+<ParamField path="out_handle_attrs" type="SfOutHandleAttrs" required>
+  Handle attributes for up to 8 output handles
+</ParamField>
+
+<ParamField path="out_handles" type="Handle*">
+  Array to receive output handles
+</ParamField>
+
+<ResponseField name="Result" type="Result">
+  Returns 0 on success, or an error code on failure
+</ResponseField>
+
+---
+
+### nnServiceDispatchImpl
+
+Dispatches a complete IPC request and parses the response.
+
+```cpp
+Result nnServiceDispatchImpl(
+    Service* s,
+    u32 request_id,
+    const void* in_data,
+    u32 in_data_size,
+    void* out_data,
+    u32 out_data_size,
+    SfDispatchParams disp
+)
+```
+
+<ParamField path="s" type="Service*" required>
+  Service to dispatch the request to
+</ParamField>
+
+<ParamField path="request_id" type="u32" required>
+  Command ID for the service request
+</ParamField>
+
+<ParamField path="in_data" type="const void*">
+  Pointer to input data
+</ParamField>
+
+<ParamField path="in_data_size" type="u32" required>
+  Size of input data in bytes
+</ParamField>
+
+<ParamField path="out_data" type="void*">
+  Pointer to buffer for output data
+</ParamField>
+
+<ParamField path="out_data_size" type="u32" required>
+  Size of output data buffer in bytes
+</ParamField>
+
+<ParamField path="disp" type="SfDispatchParams" required>
+  Dispatch parameters including buffers, handles, and objects
+</ParamField>
+
+<ResponseField name="Result" type="Result">
+  Returns 0 on success, or an error code on failure
+</ResponseField>
+
+**Example:**
+```cpp
+Service srv;
+nnServiceCreate(&srv, "pm:dmnt");
+
+u64 pid = 0x12345;
+struct {
+    u64 location;
+    u8 status;
+} out;
+
+Handle handle;
+Result rc = nnServiceDispatchImpl(
+    &srv,
+    65000,
+    &pid,
+    sizeof(pid),
+    &out,
+    sizeof(out),
+    (SfDispatchParams){
+        .out_handle_attrs = {SfOutHandleAttr_HipcCopy},
+        .out_handles = &handle
+    }
+);
+```
+
+---
+
+## Dispatch Macros
+
+For convenience, several macros are provided for common dispatch patterns:
+
+### nnServiceDispatch
+
+Dispatch a request with no input or output data.
+
+```cpp
+#define nnServiceDispatch(_s, _rid, ...)
+```
+
+### nnServiceDispatchIn
+
+Dispatch a request with input data only.
+
+```cpp
+#define nnServiceDispatchIn(_s, _rid, _in, ...)
+```
+
+### nnServiceDispatchOut
+
+Dispatch a request with output data only.
+
+```cpp
+#define nnServiceDispatchOut(_s, _rid, _out, ...)
+```
+
+### nnServiceDispatchInOut
+
+Dispatch a request with both input and output data.
+
+```cpp
+#define nnServiceDispatchInOut(_s, _rid, _in, _out, ...)
+```
+
+**Example:**
+```cpp
+u64 input = 100;
+u32 output;
+Result rc = nnServiceDispatchInOut(&srv, 42, input, output);
+```
+
+---
+
+## Ipc Class
+
+The `Ipc` class provides high-level IPC utility methods.
+
+### getOwnProcessHandle
+
+Retrieves a handle to the current process.
+
+```cpp
+static Result Ipc::getOwnProcessHandle(Handle* handleOut)
+```
+
+<ParamField path="handleOut" type="Handle*" required>
+  Pointer to receive the process handle
+</ParamField>
+
+<ResponseField name="Result" type="Result">
+  Returns 0 on success, or an error code on failure
+</ResponseField>
+
+**Implementation:**
+- Gets the current process ID via `svcGetProcessId`
+- Connects to the "pm:dmnt" service
+- Uses command 65000 to get a copy of the process handle
+- Closes the service connection
+
+**Example:**
+```cpp
+Handle procHandle;
+Result rc = skyline::utils::Ipc::getOwnProcessHandle(&procHandle);
+if (R_SUCCEEDED(rc)) {
+    // Use process handle
+}
+```
+
+<Warning>
+  The returned handle is a copy and must be closed with `svcCloseHandle` when no longer needed.
+</Warning>
+
+---
+
+## Usage in Skyline
+
+The IPC utilities are primarily used internally by Skyline for:
+- Getting the process handle during initialization
+- Communicating with system services
+- Creating custom service wrappers
+
+**Example from main.cpp:**
+```cpp
+// Populate our own process handle
+envSetOwnProcessHandle(skyline::proc_handle::Get());
+```
+
+The `proc_handle::Get()` function uses `Ipc::getOwnProcessHandle` internally to obtain the handle.

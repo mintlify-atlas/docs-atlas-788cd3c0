@@ -1,0 +1,143 @@
+---
+title: 'Game Compatibility'
+description: 'Understanding Skyline compatibility across different Nintendo Switch games'
+---
+
+## Overview
+
+Skyline was originally designed for **Super Smash Bros. Ultimate** but can be adapted to work with other Nintendo Switch games. However, compatibility is not guaranteed out of the box due to game-specific initialization requirements and memory layouts.
+
+<Warning>
+Skyline's initialization method is not universally compatible with every game. Compatibility issues arise from differences in how games initialize their runtime environment, handle memory, and structure their code.
+</Warning>
+
+## Why Compatibility Issues Occur
+
+Compatibility problems stem from several technical factors:
+
+- **Different initialization sequences**: Games initialize their runtime environment in different ways, and Skyline's hooking mechanism may not align with all initialization patterns
+- **Memory layout variations**: Each game has a unique memory structure, and Skyline needs to hook into specific functions that may be located at different addresses or may not exist
+- **Game-specific filesystem usage**: Some games handle filesystem operations (like RomFS mounting) differently, which can conflict with Skyline's hooks
+- **Runtime environment differences**: Games may use different versions of Nintendo SDK libraries or implement custom runtime behaviors
+
+## The main.npdm Requirement
+
+Each game requires a **game-specific main.npdm file** that defines:
+
+- Process permissions and capabilities
+- Filesystem access permissions
+- Service access rights
+- Kernel capabilities and syscall permissions
+- Thread priorities and CPU assignments
+
+<Info>
+The main.npdm file included in Skyline releases is specifically configured for **Super Smash Bros. Ultimate** (title ID `0x01006a800016e000`).
+</Info>
+
+### Installation Instructions
+
+1. Copy the `exefs` directory to: `atmosphere/contents/<game titleid>/`
+2. **Remove the `main.npdm` file** unless you are modding Super Smash Bros. Ultimate
+3. Obtain or create a game-specific main.npdm file using:
+   - **HACTool**: Extract game metadata
+   - **npdmtool**: Generate the npdm file with appropriate permissions
+
+<Note>
+Plugin developers typically provide the appropriate main.npdm file for their target game. If you're developing for a new game, you'll need to create this file yourself.
+</Note>
+
+## Compatible Games and Forks
+
+Due to compatibility limitations, developers have created game-specific forks of Skyline:
+
+<CardGroup cols={2}>
+  <Card title="Animal Crossing: New Horizons" icon="leaf" href="https://github.com/3096/skyline">
+    Modified Skyline for ACNH
+  </Card>
+  <Card title="Pokémon Sword/Shield" icon="bolt" href="https://github.com/3096/skyline/tree/sword">
+    Pokémon-specific branch
+  </Card>
+  <Card title="Xenoblade Chronicles DE" icon="sword" href="https://github.com/3096/skyline/tree/xde">
+    Xenoblade Definitive Edition support
+  </Card>
+  <Card title="Dragon Quest XI S" icon="dragon" href="https://github.com/3096/skyline/tree/jack">
+    Dragon Quest XI S adaptation
+  </Card>
+  <Card title="Persona 5 Royal" icon="mask" href="https://github.com/Raytwo/p5rcbt">
+    P5R-specific implementation
+  </Card>
+  <Card title="Persona 5 Strikers" icon="users" href="https://github.com/Raytwo/masquerade-rs">
+    Rust-based Persona 5 Strikers fork
+  </Card>
+  <Card title="Fire Emblem: Three Houses" icon="fire" href="https://github.com/three-houses-research-team/aldebaran-rs">
+    FE3H Rust implementation
+  </Card>
+</CardGroup>
+
+<Warning>
+Many of these forks require building from source. Pre-built releases may not be available.
+</Warning>
+
+## Adapting Skyline for New Games
+
+If you need to adapt Skyline for a game that doesn't have a fork:
+
+<Steps>
+  <Step title="Analyze the game's initialization">
+    Use a debugger or emulator to understand how the game initializes its runtime environment
+  </Step>
+  
+  <Step title="Create a game-specific main.npdm">
+    Extract the game's metadata with HACTool and generate an appropriate npdm file with sufficient permissions
+  </Step>
+  
+  <Step title="Modify Skyline's initialization hooks">
+    Adjust the hooks in `source/main.cpp` to match the game's initialization sequence. Key areas include:
+    - RomFS mounting hooks (`handleNnFsMountRom`)
+    - Socket initialization timing
+    - Plugin loading sequence
+  </Step>
+  
+  <Step title="Test and iterate">
+    Test your modifications with the TCP logger enabled to identify crashes and hook failures
+  </Step>
+</Steps>
+
+<Tip>
+Some games like Fire Emblem: Three Houses and Pokémon Sword/Shield use socket configuration variants that conflict with Skyline's default socket initialization. Check `source/main.cpp:29` for notes on these compatibility issues.
+</Tip>
+
+## Known Compatibility Notes
+
+### Games with Socket Initialization Issues
+
+From `source/main.cpp:29`:
+
+> Some games (Fire Emblem Three Houses, Pokemon Sword/Shield) use the `&Config` variant before Skyline initializes sockets and do not appreciate this.
+
+These games require modified socket initialization timing.
+
+### Games with Guard Acquire Issues
+
+From `source/main.cpp:38`:
+
+> Some older games (Final Fantasy 9) seem to have issues with `_cxa_guard_acquire` which gcc automatically adds when using static instances.
+
+Skyline bypasses the singleton pattern for plugin managers on these games.
+
+### Games with Multiple RomFS Mounts
+
+From `source/main.cpp:54`:
+
+> Some games such as Persona 5 Royal call `nn::fs::MountRom` multiple times.
+
+Skyline uses a `call_once` mechanism to handle these cases properly.
+
+## Getting Help
+
+If you encounter compatibility issues:
+
+1. Check if a game-specific fork exists in the list above
+2. Search for game-specific modifications in the community
+3. Enable TCP logging to diagnose initialization failures
+4. Review the game's crash reports in Atmosphere's error logs

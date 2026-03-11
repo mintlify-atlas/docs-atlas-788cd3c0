@@ -1,0 +1,318 @@
+---
+title: 'Building from Source'
+description: 'Complete guide to building Skyline from source code'
+---
+
+## Prerequisites
+
+Before building Skyline, ensure you have the following tools and libraries installed:
+
+<CardGroup cols={2}>
+  <Card title="devkitPro" icon="toolbox">
+    Complete devkitPro installation with devkitA64 toolchain
+  </Card>
+  <Card title="devkitA64" icon="microchip">
+    ARM64 cross-compilation toolchain
+  </Card>
+  <Card title="libnx" icon="book">
+    Nintendo Switch development library
+  </Card>
+  <Card title="Python 3" icon="python">
+    Required for build scripts (genPatch.py, sendPatch.py)
+  </Card>
+</CardGroup>
+
+### Environment Setup
+
+<Steps>
+  <Step title="Install devkitPro">
+    Download and install devkitPro from [https://devkitpro.org](https://devkitpro.org)
+  </Step>
+  
+  <Step title="Set DEVKITPRO environment variable">
+    ```bash
+    export DEVKITPRO=/opt/devkitpro
+    ```
+    
+    <Note>
+    The build system will error if `DEVKITPRO` is not set. Add this to your shell profile (`.bashrc`, `.zshrc`, etc.) for persistence.
+    </Note>
+  </Step>
+  
+  <Step title="Install devkitA64 and libnx">
+    ```bash
+    sudo dkp-pacman -S devkitA64 libnx switch-tools
+    ```
+  </Step>
+  
+  <Step title="Verify Python 3">
+    ```bash
+    python3 --version
+    ```
+    
+    If `python3` is not available, the Makefile will fall back to `python`.
+  </Step>
+</Steps>
+
+## Build Process
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/shadowninja108/Skyline.git
+    cd Skyline
+    ```
+  </Step>
+  
+  <Step title="Build Skyline">
+    Run the make command with the desired game version:
+    
+    ```bash
+    make CROSSVER=600
+    ```
+    
+    <Info>
+    The `CROSSVER` parameter specifies the target game version without decimal points. For example, `600` represents version `6.0.0` of Super Smash Bros. Ultimate.
+    </Info>
+  </Step>
+  
+  <Step title="Locate build output">
+    The compiled NSO file will be located at:
+    
+    ```
+    build600/Skyline600.nso
+    ```
+    
+    The build directory and output filename include the CROSSVER value.
+  </Step>
+</Steps>
+
+## Build Configuration
+
+### CROSSVER Parameter
+
+The `CROSSVER` parameter is critical for building game-specific versions:
+
+```bash
+make CROSSVER=600  # For game version 6.0.0
+make CROSSVER=1301 # For game version 13.0.1
+```
+
+This parameter affects:
+- **Build directory**: `build$(CROSSVER)` (e.g., `build600`)
+- **Output filename**: `Skyline$(CROSSVER).nso` (e.g., `Skyline600.nso`)
+- **Linker script selection**: `linkerscripts/syms$(CROSSVER).ld`
+- **C++ defines**: `-DCROSSVER=$(CROSSVER)` passed to compiler
+- **Configuration files**: `patches/configs/$(CROSSVER).config`
+- **Symbol maps**: `patches/maps/$(CROSSVER)/*.map`
+
+<Note>
+Default CROSSVER is `600` if not specified. See `Makefile:6`.
+</Note>
+
+### Disabling Logging
+
+To build without logging support:
+
+```bash
+make CROSSVER=600 NOLOG=1
+```
+
+This adds the `-DNOLOG` compiler flag, removing TCP logger functionality and reducing binary size.
+
+### Build Targets
+
+| Target | Description |
+|--------|-------------|
+| `make` or `make all` | Build Skyline NSO (default target) |
+| `make skyline` | Explicitly build Skyline NSO |
+| `make clean` | Remove all build artifacts and compiled files |
+| `make send IP=<address>` | Build and send to Switch via network (requires sendPatch.py) |
+
+## Build System Overview
+
+### Makefile Structure
+
+Skyline uses a two-stage makefile system:
+
+1. **Makefile**: Top-level build orchestration
+   - Manages CROSSVER parameter
+   - Handles Python script execution
+   - Coordinates patch generation
+
+2. **nso.mk**: NSO compilation rules
+   - Defines compiler flags and architecture
+   - Manages source file compilation
+   - Links final NSO binary
+
+### Compilation Flags
+
+From `nso.mk:43-54`:
+
+```makefile
+ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
+
+CFLAGS := -g -Wall -ffunction-sections \
+          $(ARCH) $(DEFINES) $(INCLUDE) -D__SWITCH__ -DCROSSVER=$(CROSSVER)
+
+CXXFLAGS := $(CFLAGS) -fno-rtti -fomit-frame-pointer -fno-exceptions \
+            -fno-asynchronous-unwind-tables -fno-unwind-tables \
+            -enable-libstdcxx-allocator=new -fpermissive
+```
+
+Key optimizations:
+- **No RTTI**: `-fno-rtti` removes runtime type information
+- **No exceptions**: `-fno-exceptions` disables C++ exception handling
+- **Frame pointer omission**: `-fomit-frame-pointer` for smaller code size
+- **Position-independent code**: `-fPIC` for dynamic linking
+
+### Linker Configuration
+
+From `nso.mk:57`:
+
+```makefile
+LDFLAGS = -specs=../switch.specs -g $(ARCH) \
+          -Wl,-Map,$(notdir $*.map) \
+          -Wl,--version-script=$(TOPDIR)/exported.txt \
+          -Wl,-init=__custom_init \
+          -Wl,-fini=__custom_fini \
+          -Wl,--export-dynamic \
+          -nodefaultlibs
+```
+
+Important linker settings:
+- **Custom init/fini**: `__custom_init` and `__custom_fini` for controlled initialization
+- **Export dynamic symbols**: Required for plugin system
+- **No default libs**: Manual library linking with `-lgcc -lstdc++ -u malloc`
+
+### Linker Scripts
+
+Skyline uses version-specific linker scripts:
+
+```
+linkerscripts/
+├── syms600.ld      # Symbols for version 6.0.0
+├── syms1301.ld     # Symbols for version 13.0.1
+└── application.ld  # Base application linker script
+```
+
+The build system copies the appropriate version:
+
+```bash
+# From nso.mk:143
+cp linkerscripts/syms$(CROSSVER).ld linkerscripts/symstemp.ld
+```
+
+<Warning>
+Linker scripts contain game-specific function addresses. Using the wrong CROSSVER will result in crashes or undefined behavior.
+</Warning>
+
+## Source Code Structure
+
+From `nso.mk:36`:
+
+```makefile
+SOURCES := source $(filter-out %.c %.cpp %.s,$(wildcard source/* source/*/* source/*/*/* source/*/*/*/*))
+```
+
+The build system recursively includes all subdirectories under `source/` up to 4 levels deep.
+
+### Include Directories
+
+From `nso.mk:38`:
+
+```makefile
+INCLUDES := include libs/libeiffel/include
+```
+
+Skyline includes the **libeiffel** library for additional functionality.
+
+## Troubleshooting Build Issues
+
+<Accordion title="Error: Please set DEVKITPRO in your environment">
+  The `DEVKITPRO` environment variable is not set. Export it:
+  
+  ```bash
+  export DEVKITPRO=/opt/devkitpro
+  ```
+  
+  Add this line to your shell profile for persistence.
+</Accordion>
+
+<Accordion title="Linker errors about missing symbols">
+  This usually means:
+  
+  1. You're using the wrong CROSSVER for your game version
+  2. The linker script `linkerscripts/syms$(CROSSVER).ld` doesn't exist
+  
+  Ensure you're building for the correct game version.
+</Accordion>
+
+<Accordion title="Python script errors">
+  The build system requires Python 3. If you get script errors:
+  
+  ```bash
+  python3 --version  # Verify Python 3 is installed
+  ```
+  
+  The Makefile will fall back to `python` if `python3` isn't found, but this may cause issues if Python 2 is installed.
+</Accordion>
+
+<Accordion title="undefined reference to '__custom_init'">
+  This indicates a problem with the linker configuration. Ensure:
+  
+  1. You're building from the root directory
+  2. The `switch.specs` file exists in the parent directory
+  3. All source files are present and unmodified
+</Accordion>
+
+## Advanced Build Options
+
+### Building for Multiple Versions
+
+You can build for multiple game versions simultaneously:
+
+```bash
+make CROSSVER=600
+make CROSSVER=1301
+```
+
+Each build uses a separate build directory, so outputs won't conflict.
+
+### Network Deployment
+
+For development testing, you can build and deploy to your Switch over the network:
+
+```bash
+make send IP=192.168.1.100 CROSSVER=600
+```
+
+This requires:
+- The `sendPatch.py` script
+- Network access to your Switch
+- A homebrew environment that accepts network patches
+
+## Build Output
+
+Successful builds produce:
+
+```
+build600/
+├── Skyline600.nso    # Compiled NSO binary
+├── Skyline600.elf    # ELF executable (intermediate)
+├── Skyline600.map    # Symbol map for debugging
+└── *.o               # Object files
+```
+
+<Tip>
+Keep the `.map` file for debugging. It contains symbol addresses that help identify crash locations.
+</Tip>
+
+## Next Steps
+
+After building Skyline:
+
+1. Copy the NSO file to your SD card's exefs directory
+2. Configure the appropriate main.npdm for your game
+3. Install plugins to the romfs/skyline/plugins directory
+4. Test with TCP logging enabled for debugging

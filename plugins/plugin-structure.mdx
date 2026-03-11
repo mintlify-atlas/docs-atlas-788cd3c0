@@ -1,0 +1,333 @@
+---
+title: 'Plugin Structure'
+description: 'Understanding the anatomy of a Skyline plugin and how to structure your code'
+---
+
+## Plugin File Format
+
+Skyline plugins are **NRO (Nintendo Relocatable Object)** files - position-independent executables that can be loaded at runtime. The plugin system uses Nintendo's `nn::ro` module loader for dynamic loading.
+
+### File Requirements
+
+- **Format**: ELF64 ARM64 executable converted to NRO
+- **Architecture**: ARMv8-A (Cortex-A57)
+- **Compilation**: Position-independent code (`-fPIC`)
+- **Extension**: `.nro`
+- **Location**: `romfs/skyline/plugins/` in the game's RomFS
+
+## Directory Structure
+
+A typical plugin project structure:
+
+```
+my-plugin/
+├── source/
+│   ├── main.cpp          # Entry point
+│   ├── hooks.cpp         # Function hooks
+│   └── utils.cpp         # Helper functions
+├── include/
+│   ├── main.hpp
+│   └── types.hpp
+├── Makefile              # Build configuration
+├── exported.txt          # Symbol export list
+└── README.md
+```
+
+## Plugin Entry Point
+
+Every plugin must export a `main()` function that serves as the entry point:
+
+```cpp
+extern "C" void main() {
+    // Plugin initialization code
+    // Set up hooks, initialize data structures, etc.
+}
+```
+
+<Info>
+  The `main()` function is called by Skyline's PluginManager after the plugin is loaded. See `PluginManager.cpp:194` for the loading process.
+</Info>
+
+### Entry Point Details
+
+- Called **once** during plugin initialization
+- Must be exported in `exported.txt`
+- Executes **synchronously** during game startup
+- No return value expected
+
+<Warning>
+  Avoid blocking operations in `main()`. Long initialization delays game startup. Consider deferring heavy work to game hooks.
+</Warning>
+
+## Symbol Exports
+
+Plugins must specify which symbols are visible externally using a version script (`exported.txt`):
+
+```text
+{
+    global:
+        main;              # Entry point (required)
+        my_hook_function;  # Custom exported function
+    local: *;              # Hide all other symbols
+};
+```
+
+### Skyline Exported Symbols
+
+Skyline exports these symbols for plugin use:
+
+```cpp
+// Logging
+extern "C" void skyline_tcp_send_raw(void* data, size_t size);
+
+// Hooking
+extern "C" void A64HookFunction(void* target, void* replace, void** original);
+extern "C" void A64InlineHook(void* target, void* replace);
+
+// Memory utilities
+extern "C" void sky_memcpy(void* dst, const void* src, size_t size);
+
+// Process information
+extern "C" u64 get_program_id();
+extern "C" void get_plugin_addresses(const void* addr, void** start, void** end);
+
+// Region addresses
+extern "C" void* getRegionAddress(skyline::utils::region region);
+```
+
+<Note>
+  These symbols are defined in `exported.txt` of the main Skyline binary.
+</Note>
+
+## Build System
+
+### Makefile Configuration
+
+Plugins require specific compiler and linker flags:
+
+#### Compiler Flags
+
+```makefile
+ARCH := -march=armv8-a -mtune=cortex-a57 -mtp=soft -fPIC -ftls-model=local-exec
+
+CXXFLAGS := -g -Wall -ffunction-sections $(ARCH) -D__SWITCH__ \
+            -fno-rtti -fomit-frame-pointer \
+            -fno-exceptions \
+            -fno-asynchronous-unwind-tables \
+            -fno-unwind-tables
+```
+
+**Key flags explained:**
+
+- `-march=armv8-a -mtune=cortex-a57`: Target Switch CPU architecture
+- `-fPIC`: Generate position-independent code (required for NRO)
+- `-ftls-model=local-exec`: Thread-local storage model
+- `-fno-rtti`: Disable runtime type information (reduces size)
+- `-fno-exceptions`: Disable C++ exceptions (required)
+
+#### Linker Flags
+
+```makefile
+LDFLAGS := -specs=$(DEVKITPRO)/libnx/switch.specs \
+           -g $(ARCH) \
+           -Wl,-Map,$(TARGET).map \
+           -Wl,--version-script=exported.txt \
+           -shared \
+           -nodefaultlibs
+
+LIBS := -lgcc -lstdc++
+```
+
+**Key flags explained:**
+
+- `-specs=.../switch.specs`: Use Nintendo Switch linker script
+- `-Wl,--version-script=exported.txt`: Control symbol visibility
+- `-shared`: Create shared object (plugin)
+- `-nodefaultlibs`: Don't link standard libraries (use game's)
+
+<Warning>
+  Using `-fexceptions` or linking against standard libraries will cause crashes. Plugins must use the game's runtime environment.
+</Warning>
+
+### Building from Skyline Source
+
+If building alongside Skyline:
+
+```makefile
+# Top-level Makefile
+CROSSVER ?= 600  # Game version (6.0.0 = 600)
+
+all:
+	$(MAKE) all -f nso.mk CROSSVER=$(CROSSVER)
+```
+
+The build system supports multiple game versions:
+
+```bash
+make            # Build for version 600 (default)
+make CROSSVER=800  # Build for version 800
+```
+
+## Linking Against Skyline APIs
+
+### Using Skyline Headers
+
+Include Skyline headers for type definitions and utilities:
+
+```cpp
+#include "skyline/inlinehook/And64InlineHook.hpp"
+#include "skyline/logger/Logger.hpp"
+#include "skyline/utils/cpputils.hpp"
+```
+
+### Accessing Game Memory Regions
+
+Skyline provides utilities to access game memory:
+
+```cpp
+#include "skyline/utils/cpputils.hpp"
+
+// Get region base addresses
+void* text_base = getRegionAddress(skyline::utils::region::Text);
+void* rodata_base = getRegionAddress(skyline::utils::region::Rodata);
+void* data_base = getRegionAddress(skyline::utils::region::Data);
+void* bss_base = getRegionAddress(skyline::utils::region::Bss);
+void* heap_base = getRegionAddress(skyline::utils::region::Heap);
+```
+
+### Using nn:: APIs
+
+Access Nintendo SDK functions through Skyline's headers:
+
+```cpp
+#include "nn/os.hpp"
+#include "nn/fs.h"
+#include "nn/socket.h"
+
+// Example: File operations
+nn::fs::FileHandle handle;
+Result rc = nn::fs::OpenFile(&handle, "rom:/data/file.bin", nn::fs::OpenMode_Read);
+if (R_SUCCEEDED(rc)) {
+    s64 size;
+    nn::fs::GetFileSize(&size, handle);
+    nn::fs::CloseFile(handle);
+}
+```
+
+## Plugin Metadata
+
+### NRO Header
+
+NRO files contain a header with module information:
+
+```cpp
+struct NroHeader {
+    u32 unused;
+    u32 module_header_offset;
+    u32 size;  // Total NRO size
+    // ... additional fields
+};
+```
+
+Skyline uses this header to:
+- Calculate SHA256 hash for module registration
+- Determine BSS size requirements
+- Validate file integrity
+
+### Module Registration
+
+Plugins are registered with `nn::ro` using NRR (Nintendo Relocatable Registry):
+
+1. Plugin files are scanned from `romfs/skyline/plugins/`
+2. SHA256 hash is calculated for each plugin
+3. Hashes are sorted and placed in an NRR
+4. NRR is registered with `nn::ro::RegisterModuleInfo()`
+5. Each plugin is loaded with `nn::ro::LoadModule()`
+
+<Info>
+  See `PluginManager.cpp:12-207` for the complete loading process.
+</Info>
+
+## Memory Layout
+
+When loaded, plugins have separate memory regions:
+
+```cpp
+struct PluginInfo {
+    std::string Path;              // Plugin file path
+    std::unique_ptr<u8> Data;      // NRO data (.text, .rodata, .data)
+    size_t Size;                   // Data size
+    utils::Sha256Hash Hash;        // Module hash
+    nn::ro::Module Module;         // Module handle
+    std::unique_ptr<u8> BssData;   // BSS section
+    size_t BssSize;                // BSS size
+};
+```
+
+- **Data**: Contains code (.text), read-only data (.rodata), and initialized data (.data)
+- **BssData**: Zero-initialized data section
+- Both regions are page-aligned (0x1000 bytes)
+
+## Plugin Naming Conventions
+
+### File Names
+
+```
+my_plugin.nro          # Snake case recommended
+CoolFeature.nro        # Pascal case acceptable
+player-mods.nro        # Kebab case acceptable
+```
+
+### Symbol Names
+
+```cpp
+// Use namespaces to avoid conflicts
+namespace myplugin {
+    void initialize();
+    void hook_player_update();
+}
+
+// Or prefix exported symbols
+extern "C" void myplugin_main();
+```
+
+<Tip>
+  Use descriptive plugin names. The PluginManager logs the filename during loading, making it easier to identify which plugin is active.
+</Tip>
+
+## Advanced: Custom Init/Fini
+
+Plugins can define constructor and destructor functions:
+
+```cpp
+__attribute__((constructor))
+void plugin_constructor() {
+    // Called before main()
+    // Useful for early initialization
+}
+
+__attribute__((destructor))
+void plugin_destructor() {
+    // Called when plugin is unloaded
+    // Note: Skyline doesn't currently unload plugins
+}
+```
+
+<Warning>
+  Plugin unloading is not currently implemented in Skyline. Destructor functions will not be called during normal operation.
+</Warning>
+
+## Best Practices
+
+1. **Minimize Exports**: Only export `main()` and necessary functions
+2. **Use Namespaces**: Avoid symbol conflicts with other plugins
+3. **Handle Errors**: Check `Result` codes from nn:: APIs
+4. **Log Liberally**: Use `skyline_tcp_send_raw()` for debugging
+5. **Test Incrementally**: Start with simple hooks before complex modifications
+6. **Document Hooks**: Comment which functions you're hooking and why
+
+## Next Steps
+
+- Explore [practical plugin examples](/plugins/examples)
+- Learn about [function hooking techniques](/api/hooks/function-hooks)
+- Study [Skyline's API reference](/api/logger/overview)

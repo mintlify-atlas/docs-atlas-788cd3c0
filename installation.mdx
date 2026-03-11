@@ -1,0 +1,248 @@
+---
+title: 'Installation'
+description: 'Install Skyline on your Nintendo Switch with Atmosphere CFW'
+---
+
+# Installing Skyline
+
+This guide will walk you through installing Skyline on your Nintendo Switch running Atmosphere custom firmware.
+
+<Warning>
+Skyline requires a Nintendo Switch with Atmosphere CFW installed. This guide assumes you already have a working CFW setup. Modifying your Switch may void your warranty.
+</Warning>
+
+## Prerequisites
+
+Before installing Skyline, ensure you have:
+
+- Nintendo Switch with Atmosphere CFW installed
+- SD card with sufficient space (at least 500MB free)
+- Super Smash Bros. Ultimate installed (or another compatible game)
+- USB or FTP access to your Switch's SD card
+
+## Installation Steps
+
+<Steps>
+  <Step title="Download Skyline">
+    Head to the [Skyline releases page](https://github.com/skyline-dev/skyline/releases) and download the latest `skyline.zip` file.
+    
+    The release archive contains:
+    - `exefs/` directory with Skyline's NSO and NPDM files
+    - Subsdk libraries
+    - Runtime initialization code
+  </Step>
+
+  <Step title="Locate Your Game's Title ID">
+    Find your game's Title ID. For Super Smash Bros. Ultimate:
+    
+    ```
+    01006A800016E000
+    ```
+    
+    Other common Title IDs:
+    - Animal Crossing: `01006F8002326000`
+    - Pokémon Sword: `0100ABF008968000`
+    - Pokémon Shield: `01008DB008C2C000`
+    
+    <Info>
+    You can find Title IDs using tools like nxdumptool or by checking SwitchBrew's game list.
+    </Info>
+  </Step>
+
+  <Step title="Extract to Atmosphere Directory">
+    Copy the `exefs` directory from the downloaded archive to your SD card:
+    
+    ```
+    sd:/atmosphere/contents/<TITLE_ID>/exefs/
+    ```
+    
+    For Super Smash Bros. Ultimate, the full path is:
+    ```
+    sd:/atmosphere/contents/01006A800016E000/exefs/
+    ```
+    
+    <Note>
+    The `exefs` directory should contain:
+    - `main.npdm` - Process metadata descriptor
+    - `subsdk*` - System libraries
+    - Other Skyline core files
+    </Note>
+  </Step>
+
+  <Step title="Handle the main.npdm File">
+    The `main.npdm` file is **game-specific** and defines process permissions and metadata.
+    
+    <Warning>
+    **Important:** Remove the `main.npdm` file from the exefs directory if you are modding any game OTHER than Super Smash Bros. Ultimate.
+    </Warning>
+    
+    For games other than SSBU:
+    1. Delete the included `main.npdm` file
+    2. Create a custom npdm file using:
+       - **HACTool** - Extract original npdm from game
+       - **npdmtool** - Modify permissions and metadata
+    3. Or use an npdm provided by the plugin/mod developer
+    
+    The npdm file controls:
+    - Memory permissions
+    - System call access
+    - Thread priority
+    - Available system resources
+  </Step>
+
+  <Step title="Create Plugin Directory">
+    Create the directory structure for plugins:
+    
+    ```
+    sd:/atmosphere/contents/<TITLE_ID>/romfs/skyline/plugins/
+    ```
+    
+    For Super Smash Bros. Ultimate:
+    ```
+    sd:/atmosphere/contents/01006A800016E000/romfs/skyline/plugins/
+    ```
+    
+    This is where you'll place plugin `.nro` files. Skyline automatically discovers and loads all NRO files in this directory and its subdirectories.
+    
+    <Info>
+    The path `skyline/plugins` is hardcoded in `PluginManager.hpp:13` as `PLUGIN_PATH`.
+    </Info>
+  </Step>
+
+  <Step title="Verify Installation">
+    Your SD card structure should look like:
+    
+    ```
+    SD Card
+    └── atmosphere/
+        └── contents/
+            └── 01006A800016E000/
+                ├── exefs/
+                │   ├── main.npdm
+                │   ├── subsdk*
+                │   └── [other skyline files]
+                └── romfs/
+                    └── skyline/
+                        └── plugins/
+                            └── [your .nro plugins here]
+    ```
+  </Step>
+
+  <Step title="Launch the Game">
+    1. Safely eject your SD card and reinsert it into your Switch
+    2. Boot into Atmosphere CFW
+    3. Launch Super Smash Bros. Ultimate (or your target game)
+    
+    Skyline will initialize automatically when the game starts.
+  </Step>
+</Steps>
+
+## Verification
+
+To verify Skyline is working:
+
+1. **Check for crashes**: If the game launches normally, Skyline loaded successfully
+2. **Enable TCP logging**: Connect to your Switch's IP on port 6969 to view logs
+3. **Watch for initialization messages**: Look for `[skyline_main] Beginning initialization.` in logs
+4. **Check plugin loading**: Messages like `[PluginManager] Loaded '<plugin>'` confirm plugins loaded
+
+### TCP Logging
+
+Skyline uses `TcpLogger` by default (`source/main.cpp:112`). Connect using:
+
+```bash
+telnet <switch-ip> 6969
+```
+
+Or use netcat:
+```bash
+nc <switch-ip> 6969
+```
+
+You should see output like:
+```
+[skyline_main] Beginning initialization.
+[skyline_main] text: 0x... | rodata: 0x... | data: 0x... | bss: 0x... | heap: 0x...
+[skyline_main] Ran hooked nn::ro::initialize (0x0)
+[PluginManager] Initializing plugins...
+[PluginManager] Opening plugins...
+[PluginManager] Loading plugins...
+```
+
+## Troubleshooting
+
+### Game Crashes on Launch
+
+<AccordionGroup>
+  <Accordion title="Incompatible main.npdm file">
+    Remove the `main.npdm` file if you're not using Super Smash Bros. Ultimate, or create a game-specific one.
+  </Accordion>
+  
+  <Accordion title="Corrupted Skyline files">
+    Re-download skyline.zip and extract fresh files to your SD card.
+  </Accordion>
+  
+  <Accordion title="Atmosphere version mismatch">
+    Ensure you're using a compatible version of Atmosphere. Skyline requires Atmosphere 0.19.0 or later.
+  </Accordion>
+  
+  <Accordion title="Game not supported">
+    Check if your game requires a modified version of Skyline. See the [compatibility section](/introduction#game-compatibility).
+  </Accordion>
+</AccordionGroup>
+
+### Plugins Not Loading
+
+<Warning>
+Plugins must be valid NRO (Nintendo Relocatable Object) files. Standard NSO or homebrew NRO files will not work.
+</Warning>
+
+**Common issues:**
+
+1. **Wrong directory**: Verify plugins are in `romfs/skyline/plugins/`, not `exefs/`
+2. **Invalid NRO**: Check that the plugin was compiled correctly for Skyline
+3. **Duplicate plugins**: Skyline skips duplicate hashes (detected by SHA256)
+4. **Missing symbols**: Plugin may be missing required exports
+
+Check the TCP logs for specific error messages:
+```
+[PluginManager] Failed to get NRO buffer size for '<plugin>' (0x...), not an nro? Skipping.
+[PluginManager] Failed to load '<plugin>' (0x...). Skipping.
+[PluginManager] '<plugin>' is detected duplicate, Skipping.
+```
+
+### No Log Output
+
+1. **Check network connection**: Ensure your Switch and PC are on the same network
+2. **Firewall blocking**: Allow port 6969 through your firewall
+3. **Socket initialization failed**: Some games conflict with Skyline's socket initialization
+4. **NOLOG build**: If Skyline was compiled with `-DNOLOG`, logging is disabled
+
+## Compatibility Issues
+
+<Warning>
+Skyline's initialization is not compatible with every game out of the box. Different games may require forked versions of Skyline.
+</Warning>
+
+From `README.md:12-14`:
+> Skyline's way of initializing is not compatible with every game out of the box due to various reasons that can't be anticipated. Mod developers might sometimes modify Skyline to make it compatible with a specific game which you should use if you are running into crashes.
+
+If you experience crashes:
+
+1. Check if a game-specific fork exists (see [Introduction - Game Compatibility](/introduction#game-compatibility))
+2. Try building from a fork that supports your game
+3. Create your own compatibility patches (advanced)
+
+## Next Steps
+
+Now that Skyline is installed, you're ready to:
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Create your first Skyline plugin
+  </Card>
+  
+  <Card title="Plugin Development" icon="code" href="/plugins/getting-started">
+    Learn about plugin architecture and APIs
+  </Card>
+</CardGroup>
