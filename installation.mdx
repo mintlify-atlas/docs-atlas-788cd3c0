@@ -160,7 +160,7 @@ nc <switch-ip> 6969
 ```
 
 You should see output like:
-```
+```text
 [skyline_main] Beginning initialization.
 [skyline_main] text: 0x... | rodata: 0x... | data: 0x... | bss: 0x... | heap: 0x...
 [skyline_main] Ran hooked nn::ro::initialize (0x0)
@@ -205,7 +205,7 @@ Plugins must be valid NRO (Nintendo Relocatable Object) files. Standard NSO or h
 4. **Missing symbols**: Plugin may be missing required exports
 
 Check the TCP logs for specific error messages:
-```
+```text
 [PluginManager] Failed to get NRO buffer size for '<plugin>' (0x...), not an nro? Skipping.
 [PluginManager] Failed to load '<plugin>' (0x...). Skipping.
 [PluginManager] '<plugin>' is detected duplicate, Skipping.

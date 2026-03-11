@@ -215,14 +215,29 @@ The logger uses a message queue to avoid blocking the main thread. Messages are 
 
 ## Available Implementations
 
+Skyline provides several logger implementations for different use cases:
+
 <CardGroup cols={2}>
   <Card title="TcpLogger" icon="network-wired" href="/api/logger/tcp-logger">
-    Network-based logging over TCP socket
+    Network-based logging over TCP socket (port 6969)
   </Card>
   <Card title="SdLogger" icon="sd-card" href="/api/logger/sd-logger">
     File-based logging to SD card
   </Card>
+  <Card title="KernelLogger" icon="terminal">
+    Low-level kernel debug output via svcOutputDebugString
+  </Card>
+  <Card title="DualLogger" icon="clone">
+    Combines TCP and SD logging for redundancy
+  </Card>
+  <Card title="DummyLogger" icon="ban">
+    No-op logger for production builds
+  </Card>
 </CardGroup>
+
+<Note>
+**TcpLogger** and **SdLogger** have full documentation pages. Other logger types follow the same base interface but are typically used in specialized scenarios.
+</Note>
 
 ---
 
